@@ -10,10 +10,20 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" }
+    { urls: "stun:stun.cloudflare.com:3478" },
+    {
+        urls: [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turn:openrelay.metered.ca:443?transport=tcp"
+        ],
+        username: "openrelayproject",
+        credential: "openrelayproject"
+    }
 ];
+
+let pendingIceCandidates = [];
+let remoteDescApplied = false;
 
 let disconnectGraceTimer = null;
 
@@ -420,11 +430,20 @@ function startMqttSignaling(room, token, brokerIdx) {
                 type: msg.sdpType || "answer",
                 sdp: msg.sdp
             }));
+            remoteDescApplied = true;
+            while (pendingIceCandidates.length > 0) {
+                const c = pendingIceCandidates.shift();
+                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+            }
         } else if (msg.type === "ice" && pc && msg.candidate) {
-            try {
-                await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-            } catch (e) {
-                console.warn("ICE ekleme hatası:", e);
+            if (!remoteDescApplied) {
+                pendingIceCandidates.push(msg.candidate);
+            } else {
+                try {
+                    await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                } catch (e) {
+                    console.warn("ICE ekleme hatası:", e);
+                }
             }
         } else if (msg.type === "bye") {
             cleanupClient("Karşı taraf oturumu sonlandırdı.");
@@ -433,6 +452,8 @@ function startMqttSignaling(room, token, brokerIdx) {
 }
 
 async function initWebRTCClient(toHostTopic, token) {
+    pendingIceCandidates = [];
+    remoteDescApplied = false;
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 });
 
     // Audio playback element (separate so video autoplay never blocks)
@@ -657,6 +678,8 @@ function cleanupClient(alertMsg) {
     }
     if (dc) { try { dc.close(); } catch {} dc = null; }
     if (pc) { try { pc.close(); } catch {} pc = null; }
+    pendingIceCandidates = [];
+    remoteDescApplied = false;
     audioSender = null;
     if (localMicStream) {
         localMicStream.getTracks().forEach(t => t.stop());

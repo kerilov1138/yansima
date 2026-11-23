@@ -79,6 +79,15 @@ STUN_SERVERS = [
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun.cloudflare.com:3478"]),
+    RTCIceServer(
+        urls=[
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turn:openrelay.metered.ca:443?transport=tcp",
+        ],
+        username="openrelayproject",
+        credential="openrelayproject",
+    ),
 ]
 
 AUDIO_SAMPLE_RATE = 48000
@@ -207,6 +216,8 @@ class HostSession:
         self.privacy_enabled = False
         self.data_channel = None
         self.incoming_files = {}
+        self.pending_ice = []
+        self.remote_desc_set = False
         self.ui_port = 8000
 
     def rotate_token(self):
@@ -797,6 +808,7 @@ async def handle_offer(client_id, sdp, sdp_type):
     session.pc = pc
     session.active_client_id = client_id
     session.session_active = True
+    session.remote_desc_set = False
     session.mic_enabled = True
     session.spk_enabled = True
 
@@ -879,22 +891,34 @@ async def handle_offer(client_id, sdp, sdp_type):
             if session.pc is pc:
                 await close_peer_connection(rotate=True)
 
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
+    try:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
+        session.remote_desc_set = True
+        for cand_dict in list(session.pending_ice):
+            await handle_remote_ice(cand_dict)
+        session.pending_ice.clear()
 
-    publish_to_client(
-        client_id,
-        {
-            "type": "answer",
-            "sdp": pc.localDescription.sdp,
-            "sdpType": pc.localDescription.type,
-        },
-    )
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        publish_to_client(
+            client_id,
+            {
+                "type": "answer",
+                "sdp": pc.localDescription.sdp,
+                "sdpType": pc.localDescription.type,
+            },
+        )
+    except Exception as e:
+        print(f"[WEBRTC] Offer işleme hatası: {e}")
+        await close_peer_connection(rotate=True)
 
 
 async def handle_remote_ice(cand_dict):
-    if not session.pc or not cand_dict:
+    if not cand_dict:
+        return
+    if not session.pc or not session.remote_desc_set:
+        session.pending_ice.append(cand_dict)
         return
     try:
         cand_str = cand_dict.get("candidate", "")
@@ -923,17 +947,23 @@ async def handle_remote_ice(cand_dict):
 async def close_peer_connection(rotate=True):
     was_active = session.session_active or (session.pc is not None)
     session.session_active = False
+    session.remote_desc_set = False
+    session.pending_ice.clear()
     release_all_keys()
 
-    if session.pc:
+    pc_to_close = session.pc
+    session.pc = None
+    if pc_to_close:
         try:
-            for sender in session.pc.getSenders():
+            for sender in pc_to_close.getSenders():
                 if sender.track:
-                    sender.track.stop()
-            await session.pc.close()
+                    try:
+                        sender.track.stop()
+                    except Exception:
+                        pass
+            await asyncio.wait_for(pc_to_close.close(), timeout=2.0)
         except Exception:
             pass
-        session.pc = None
 
     session.active_client_id = None
     session.pending_client = None
@@ -1073,7 +1103,7 @@ def get_invite_info():
 
 @eel.expose
 def regenerate_invite():
-    if not session.session_active or session.pc is None:
+    if session.pc is None or not session.session_active or session.pc.connectionState in ("closed", "failed"):
         session.session_active = False
         session.pending_client = None
         session.rotate_token()
