@@ -8,8 +8,11 @@ const MQTT_BROKERS = [
 const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
 ];
+
+let disconnectGraceTimer = null;
 
 let currentRoom = "";
 let currentToken = "";
@@ -296,7 +299,22 @@ async function initWebRTCClient(toHostTopic, token) {
 
     pc.onconnectionstatechange = () => {
         if (!pc) return;
-        if (pc.connectionState === "failed" || pc.connectionState === "disconnected" || pc.connectionState === "closed") {
+        const state = pc.connectionState;
+        if (state === "connected") {
+            if (disconnectGraceTimer) {
+                clearTimeout(disconnectGraceTimer);
+                disconnectGraceTimer = null;
+            }
+        } else if (state === "disconnected") {
+            if (!disconnectGraceTimer) {
+                disconnectGraceTimer = setTimeout(() => {
+                    disconnectGraceTimer = null;
+                    if (pc && (pc.connectionState === "disconnected" || pc.connectionState === "failed")) {
+                        cleanupClient("WebRTC bağlantısı zaman aşımına uğradı.");
+                    }
+                }, 5000);
+            }
+        } else if (state === "failed" || state === "closed") {
             cleanupClient("WebRTC bağlantısı kesildi.");
         }
     };
@@ -304,17 +322,33 @@ async function initWebRTCClient(toHostTopic, token) {
     // DataChannel for mouse, touch, keyboard
     dc = pc.createDataChannel("control", { ordered: true });
     dc.onopen = () => console.log("Kontrol kanalı açıldı.");
+    dc.onclose = () => {
+        if (pc) {
+            setTimeout(() => {
+                if (pc && (!dc || dc.readyState === "closed")) {
+                    cleanupClient("Bağlantı sonlandı.");
+                }
+            }, 1500);
+        }
+    };
 
     // Request video from host + bidirectional audio
     pc.addTransceiver("video", { direction: "recvonly" });
 
     try {
-        localMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localMicStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        });
         localMicStream.getAudioTracks().forEach(t => {
             t.enabled = micEnabled;
             pc.addTrack(t, localMicStream);
         });
-    } catch {
+    } catch (err) {
+        console.warn("Mikrofon erişimi alınamadı:", err);
         pc.addTransceiver("audio", { direction: "recvonly" });
     }
 
@@ -330,20 +364,34 @@ async function initWebRTCClient(toHostTopic, token) {
     }));
 }
 
+function sendByeSignal() {
+    if (mqttClient && mqttClient.connected && document.getElementById("remote-room").value) {
+        const room = document.getElementById("remote-room").value.replace(/[^0-9]/g, "").trim();
+        const token = document.getElementById("remote-token").value.trim();
+        if (room) {
+            mqttClient.publish(`yansima/v1/${room}/to-host`, JSON.stringify({ type: "bye", clientId, token }));
+        }
+    }
+}
+
+window.addEventListener("pagehide", sendByeSignal);
+window.addEventListener("beforeunload", sendByeSignal);
+
 function cancelConnection() {
+    sendByeSignal();
     cleanupClient(null);
 }
 
 function disconnect() {
-    if (mqttClient && mqttClient.connected && document.getElementById("remote-room").value) {
-        const room = document.getElementById("remote-room").value.replace(/[^0-9]/g, "").trim();
-        const token = document.getElementById("remote-token").value.trim();
-        mqttClient.publish(`yansima/v1/${room}/to-host`, JSON.stringify({ type: "bye", clientId, token }));
-    }
+    sendByeSignal();
     cleanupClient(null);
 }
 
 function cleanupClient(alertMsg) {
+    if (disconnectGraceTimer) {
+        clearTimeout(disconnectGraceTimer);
+        disconnectGraceTimer = null;
+    }
     if (dc) { try { dc.close(); } catch {} dc = null; }
     if (pc) { try { pc.close(); } catch {} pc = null; }
     if (localMicStream) {
@@ -489,8 +537,16 @@ let touchStartInfo = null;
 let longPressTimer = null;
 let twoFingerLastY = null;
 
+function ensureRemoteAudioPlaying() {
+    const remoteAudio = document.getElementById("remote-audio");
+    if (remoteAudio && spkEnabled && remoteAudio.paused && remoteAudio.srcObject) {
+        remoteAudio.play().catch(() => {});
+    }
+}
+
 remoteVideo.addEventListener("touchstart", (e) => {
     e.preventDefault();
+    ensureRemoteAudioPlaying();
     if (e.touches.length === 2) {
         clearTimeout(longPressTimer);
         twoFingerLastY = (e.touches[0].clientY + e.touches[1].clientY) / 2;

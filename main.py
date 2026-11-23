@@ -26,7 +26,7 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
 )
-from av import AudioFrame, VideoFrame
+from av import AudioFrame, AudioResampler, VideoFrame
 
 # --- DPI AWARENESS & PYAUTOGUI ---
 def set_dpi_awareness():
@@ -292,6 +292,7 @@ class HostMicAudioTrack(MediaStreamTrack):
 
 async def play_remote_audio(track):
     stream = None
+    resampler = AudioResampler(format="s16", layout="mono", rate=AUDIO_SAMPLE_RATE)
     try:
         stream = sd.OutputStream(
             samplerate=AUDIO_SAMPLE_RATE,
@@ -303,11 +304,10 @@ async def play_remote_audio(track):
             frame = await track.recv()
             if not session.spk_enabled:
                 continue
-            arr = frame.to_ndarray()
-            if arr.ndim > 1:
-                arr = arr[0]
-            pcm = arr.astype(np.int16).reshape(-1, 1)
-            stream.write(pcm)
+            for resampled in resampler.resample(frame):
+                arr = resampled.to_ndarray()
+                pcm = arr.reshape(-1, 1).astype(np.int16)
+                stream.write(pcm)
     except Exception:
         pass
     finally:
@@ -395,6 +395,15 @@ async def handle_offer(client_id, sdp, sdp_type):
             if isinstance(message, str):
                 process_control_command(message)
 
+        @channel.on("close")
+        def on_close():
+            async def _check_dc_close():
+                await asyncio.sleep(2)
+                if session.pc is pc:
+                    await close_peer_connection(rotate=True)
+
+            asyncio.create_task(_check_dc_close())
+
     @pc.on("icecandidate")
     def on_icecandidate(candidate):
         if candidate:
@@ -415,8 +424,13 @@ async def handle_offer(client_id, sdp, sdp_type):
         print(f"[WEBRTC] Durum: {pc.connectionState}")
         if pc.connectionState == "connected":
             ui_queue.put(("show_host_view",))
-        elif pc.connectionState in ("failed", "closed", "disconnected"):
-            await close_peer_connection(rotate=True)
+        elif pc.connectionState == "disconnected":
+            await asyncio.sleep(5)
+            if session.pc is pc and pc.connectionState in ("disconnected", "failed", "closed"):
+                await close_peer_connection(rotate=True)
+        elif pc.connectionState in ("failed", "closed"):
+            if session.pc is pc:
+                await close_peer_connection(rotate=True)
 
     await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
     answer = await pc.createAnswer()
@@ -530,6 +544,13 @@ def start_mqtt_worker():
                 return
 
             if mtype == "join":
+                if session.pending_client is not None:
+                    # Expire stale pending requests after 30s or allow retry from same clientId
+                    if (
+                        session.pending_client.get("clientId") == cid
+                        or (time.time() - session.pending_client.get("ts", 0)) > 30
+                    ):
+                        session.pending_client = None
                 if session.session_active or session.pending_client is not None:
                     publish_to_client(cid, {"type": "rejected", "reason": "Bu bilgisayar şu anda başka bir oturumda."})
                     return
@@ -537,6 +558,7 @@ def start_mqtt_worker():
                     "clientId": cid,
                     "token": tok,
                     "device": data.get("device", "Uzak Cihaz"),
+                    "ts": time.time(),
                 }
                 ui_queue.put(("show_request", session.pending_client["device"]))
 
@@ -555,6 +577,9 @@ def start_mqtt_worker():
                     )
 
             elif mtype == "bye":
+                if session.pending_client and session.pending_client.get("clientId") == cid:
+                    session.pending_client = None
+                    ui_queue.put(("host_ended",))
                 if session.loop:
                     asyncio.run_coroutine_threadsafe(close_peer_connection(rotate=True), session.loop)
 
@@ -607,6 +632,18 @@ def respond_to_request(allow):
     cid = pending["clientId"]
     if allow:
         publish_to_client(cid, {"type": "accepted"})
+
+        def _expire_if_no_offer():
+            time.sleep(20)
+            if (
+                not session.session_active
+                and session.pending_client
+                and session.pending_client.get("clientId") == cid
+            ):
+                session.pending_client = None
+                ui_queue.put(("host_ended",))
+
+        threading.Thread(target=_expire_if_no_offer, daemon=True).start()
     else:
         session.pending_client = None
         publish_to_client(cid, {"type": "rejected", "reason": "Bağlantı isteği reddedildi."})
