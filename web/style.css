@@ -599,6 +599,20 @@ button:disabled {
     backdrop-filter: blur(6px);
 }
 
+.video-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.65);
+    color: #f4f4f6;
+    font-size: 14px;
+    font-weight: 500;
+    z-index: 15;
+    pointer-events: none;
+}
+
 #mobile-kb-input {
     position: fixed;
     top: -200px;

@@ -10,6 +10,8 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
 ];
 
@@ -78,6 +80,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (isAndroidApp) {
         const tmBtn = document.getElementById("btn-touchmode");
         if (tmBtn) tmBtn.classList.add("hidden");
+        const qrBtn = document.getElementById("qr-scan-btn");
+        if (qrBtn) qrBtn.classList.remove("hidden");
     }
 
     // Parse ?room=...&token=... from invite URL
@@ -174,9 +178,16 @@ function hostSendFile() {
     }
 }
 
-function regenerateInvite() {
+async function regenerateInvite() {
     if (isDesktopApp) {
-        eel.regenerate_invite()();
+        try {
+            const info = await eel.regenerate_invite()();
+            if (info && info.token) {
+                update_invite_ui(info.room, info.token);
+            }
+        } catch (e) {
+            console.error("Yenileme hatası:", e);
+        }
     }
 }
 
@@ -422,20 +433,31 @@ function startMqttSignaling(room, token, brokerIdx) {
 }
 
 async function initWebRTCClient(toHostTopic, token) {
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 });
 
     // Audio playback element (separate so video autoplay never blocks)
     const remoteVideo = document.getElementById("remote-video");
     const remoteAudio = document.getElementById("remote-audio");
+    const loadingOverlay = document.getElementById("video-loading-overlay");
+
+    remoteVideo.onloadeddata = () => {
+        if (loadingOverlay) loadingOverlay.classList.add("hidden");
+    };
+    remoteVideo.onplaying = () => {
+        if (loadingOverlay) loadingOverlay.classList.add("hidden");
+    };
 
     pc.ontrack = (event) => {
         const stream = event.streams[0] || new MediaStream([event.track]);
         if (event.track.kind === "video") {
-            remoteVideo.srcObject = stream;
-            remoteVideo.play().catch(() => {});
             document.getElementById("waiting-modal").classList.add("hidden");
             document.getElementById("dashboard").classList.add("hidden");
             document.getElementById("remote-view").classList.remove("hidden");
+            if (loadingOverlay) loadingOverlay.classList.remove("hidden");
+
+            remoteVideo.srcObject = stream;
+            remoteVideo.muted = true;
+            remoteVideo.play().catch(() => {});
         } else if (event.track.kind === "audio") {
             remoteAudio.srcObject = stream;
             remoteAudio.muted = !spkEnabled;
@@ -594,24 +616,15 @@ async function initWebRTCClient(toHostTopic, token) {
     }
 
     const offer = await pc.createOffer();
-    const boostedSdp = boostVideoBitrate(offer.sdp);
-    await pc.setLocalDescription({ type: offer.type, sdp: boostedSdp });
+    await pc.setLocalDescription(offer);
 
     mqttClient.publish(toHostTopic, JSON.stringify({
         type: "offer",
         clientId,
         token,
-        sdp: boostedSdp,
+        sdp: offer.sdp,
         sdpType: offer.type
     }));
-}
-
-function boostVideoBitrate(sdp) {
-    if (!sdp) return sdp;
-    return sdp.replace(/a=fmtp:(\d+) (.+)/g, (match, pt, params) => {
-        if (params.includes("x-google-max-bitrate")) return match;
-        return `a=fmtp:${pt} ${params};x-google-min-bitrate=1500;x-google-start-bitrate=3000;x-google-max-bitrate=6000`;
-    });
 }
 
 function sendByeSignal() {
@@ -1177,6 +1190,10 @@ let longPressTimer = null;
 let twoFingerState = null;
 
 function ensureRemoteAudioPlaying() {
+    const remoteVideo = document.getElementById("remote-video");
+    if (remoteVideo && remoteVideo.paused && remoteVideo.srcObject) {
+        remoteVideo.play().catch(() => {});
+    }
     const remoteAudio = document.getElementById("remote-audio");
     if (remoteAudio && spkEnabled && remoteAudio.paused && remoteAudio.srcObject) {
         remoteAudio.play().catch(() => {});

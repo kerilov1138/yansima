@@ -117,7 +117,7 @@
                     </div>
                     <div style="display: flex; gap: 10px;">
                         <button id="connect-btn" onclick="connectToPeer()" style="flex: 1;">Bağlan</button>
-                        <button id="qr-scan-btn" class="secondary-btn" onclick="openQrScanner()" style="padding: 12px 16px; font-size: 14px;">QR Tara</button>
+                        <button id="qr-scan-btn" class="secondary-btn hidden" onclick="openQrScanner()" style="padding: 12px 16px; font-size: 14px;">QR Tara</button>
                     </div>
                 </div>
             </div>
@@ -165,6 +165,7 @@
         <div class="video-wrapper" id="video-wrapper">
             <video id="remote-video" autoplay playsinline muted></video>
             <audio id="remote-audio" autoplay playsinline></audio>
+            <div id="video-loading-overlay" class="video-loading-overlay hidden">Görüntü yükleniyor...</div>
             <button id="btn-exit-fs" class="exit-fs-btn hidden" onclick="toggleFullscreen()">Tam Ekrandan Çık</button>
             <div id="client-chat-box" class="mini-chat-panel hidden">
                 <div class="mini-chat-header">

@@ -229,6 +229,7 @@ class ScreenVideoTrack(MediaStreamTrack):
         self._last_rgb = None
         self._start_time = None
         self._frame_count = 0
+        self._pts = 0
 
     def _ensure_dxcam(self, monitor_idx):
         if dxcam is None or self._dx_failed or monitor_idx <= 0:
@@ -303,8 +304,9 @@ class ScreenVideoTrack(MediaStreamTrack):
         loop = asyncio.get_running_loop()
         rgb = await loop.run_in_executor(self._executor, self._grab_frame)
         frame = VideoFrame.from_ndarray(rgb, format="rgb24")
-        frame.pts = self._frame_count * 1500  # 90kHz base
+        frame.pts = self._pts
         frame.time_base = fractions.Fraction(1, 90000)
+        self._pts += int(90000 / fps)
         self._frame_count += 1
         return frame
 
@@ -330,6 +332,7 @@ class HostMicAudioTrack(MediaStreamTrack):
         self._pts = 0
         self._start_time = None
         self._frame_count = 0
+        self._pts = 0
         self._stream = None
         self._resampler = None
         self._in_rate = AUDIO_SAMPLE_RATE
@@ -1069,7 +1072,9 @@ def get_invite_info():
 @eel.expose
 def regenerate_invite():
     if not session.session_active:
+        session.pending_client = None
         session.rotate_token()
+    return {"room": session.room_id, "token": session.current_token}
 
 
 @eel.expose
