@@ -101,8 +101,11 @@
                 <button id="btn-spk" onclick="toggleSpk()">Hoparlör: Açık</button>
             </div>
             <div class="toolbar-right">
+                <button id="btn-touchmode" class="mobile-only-btn" onclick="toggleTouchMode()">Fare: Dokunmatik</button>
                 <button id="btn-rclick" class="mobile-only-btn" onclick="toggleRightClickMode()">Sağ Tık: Kapalı</button>
-                <button id="btn-kb" onclick="focusMobileKeyboard()">Klavye</button>
+                <button id="btn-zoom" onclick="toggleZoomReset()">Yakınlaştır: 1x</button>
+                <button id="btn-rotate" class="mobile-only-btn" onclick="toggleOrientation()">Yatay</button>
+                <button id="btn-kb" onclick="toggleMobileKeyboard()">Klavye</button>
                 <button onclick="toggleFullscreen()">Tam Ekran</button>
                 <button onclick="disconnect()" class="btn-danger">Bağlantıyı Kes</button>
             </div>

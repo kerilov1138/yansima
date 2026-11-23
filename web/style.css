@@ -378,6 +378,8 @@ button:disabled {
     cursor: crosshair;
     user-select: none;
     -webkit-user-select: none;
+    transform-origin: center center;
+    will-change: transform;
 }
 
 .remote-cursor {

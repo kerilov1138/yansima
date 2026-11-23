@@ -1,8 +1,10 @@
 package com.yansima.remotedesktop;
 
 import android.Manifest;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import androidx.core.app.ActivityCompat;
@@ -26,6 +28,21 @@ public class MainActivity extends BridgeActivity {
         }
 
         if (this.bridge != null && this.bridge.getWebView() != null) {
+            this.bridge.getWebView().addJavascriptInterface(new Object() {
+                @JavascriptInterface
+                public void setOrientation(final String mode) {
+                    runOnUiThread(() -> {
+                        if ("landscape".equals(mode)) {
+                            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                        } else if ("portrait".equals(mode)) {
+                            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+                        } else {
+                            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                        }
+                    });
+                }
+            }, "AndroidBridge");
+
             this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
                 @Override
                 public void onPermissionRequest(final PermissionRequest request) {

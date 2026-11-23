@@ -26,6 +26,14 @@ let clientId = "c_" + Math.random().toString(36).slice(2, 10);
 let micEnabled = false;
 let spkEnabled = true;
 let rightClickMode = false;
+let trackpadMode = false;
+let kbOpen = false;
+let isLandscapeLocked = false;
+let zoomScale = 1;
+let panX = 0;
+let panY = 0;
+let cursorNx = 0.5;
+let cursorNy = 0.5;
 let hostMicState = true;
 let hostSpkState = true;
 
@@ -427,9 +435,30 @@ function cleanupClient(alertMsg) {
     micEnabled = false;
     spkEnabled = true;
     rightClickMode = false;
+    trackpadMode = false;
+    kbOpen = false;
+    isLandscapeLocked = false;
+    resetZoom();
     updateBtn("btn-mic", false, "Mikrofon");
     updateBtn("btn-spk", true, "Hoparlör");
     updateBtn("btn-rclick", false, "Sağ Tık");
+    const tmBtn = document.getElementById("btn-touchmode");
+    if (tmBtn) {
+        tmBtn.innerText = "Fare: Dokunmatik";
+        tmBtn.classList.remove("active-toggle");
+    }
+    const kbBtn = document.getElementById("btn-kb");
+    if (kbBtn) kbBtn.classList.remove("active-toggle");
+    const rotBtn = document.getElementById("btn-rotate");
+    if (rotBtn) {
+        rotBtn.innerText = "Yatay";
+        rotBtn.classList.remove("active-toggle");
+    }
+    if (window.AndroidBridge && window.AndroidBridge.setOrientation) {
+        window.AndroidBridge.setOrientation("auto");
+    } else if (screen.orientation && screen.orientation.unlock) {
+        try { screen.orientation.unlock(); } catch {}
+    }
 
     if (alertMsg) alert(alertMsg);
 }
@@ -484,9 +513,93 @@ function toggleRightClickMode() {
     if (btn) btn.classList.toggle("active-toggle", rightClickMode);
 }
 
-function focusMobileKeyboard() {
+function toggleTouchMode() {
+    trackpadMode = !trackpadMode;
+    const btn = document.getElementById("btn-touchmode");
+    if (btn) {
+        btn.innerText = trackpadMode ? "Fare: Trackpad" : "Fare: Dokunmatik";
+        btn.classList.toggle("active-toggle", trackpadMode);
+    }
+}
+
+function toggleMobileKeyboard() {
     const kb = document.getElementById("mobile-kb-input");
-    kb.focus();
+    const btn = document.getElementById("btn-kb");
+    if (kbOpen || document.activeElement === kb) {
+        kb.blur();
+        kbOpen = false;
+        if (btn) btn.classList.remove("active-toggle");
+    } else {
+        kb.focus();
+        kbOpen = true;
+        if (btn) btn.classList.add("active-toggle");
+    }
+}
+
+function applyVideoTransform() {
+    const videoEl = document.getElementById("remote-video");
+    const wrapperEl = document.getElementById("video-wrapper");
+    if (!videoEl || !wrapperEl) return;
+
+    if (zoomScale <= 1.01) {
+        zoomScale = 1;
+        panX = 0;
+        panY = 0;
+    } else {
+        const wRect = wrapperEl.getBoundingClientRect();
+        const maxPanX = ((zoomScale - 1) * wRect.width) / 2;
+        const maxPanY = ((zoomScale - 1) * wRect.height) / 2;
+        panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+        panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+    }
+
+    videoEl.style.transform = `translate3d(${panX}px, ${panY}px, 0) scale(${zoomScale})`;
+
+    const zoomBtn = document.getElementById("btn-zoom");
+    if (zoomBtn) {
+        zoomBtn.innerText = `Yakınlaştır: ${zoomScale.toFixed(1).replace(".0", "")}x`;
+        zoomBtn.classList.toggle("active-toggle", zoomScale > 1.01);
+    }
+    updateRemoteCursor(cursorNx, cursorNy);
+}
+
+function resetZoom() {
+    zoomScale = 1;
+    panX = 0;
+    panY = 0;
+    applyVideoTransform();
+}
+
+function toggleZoomReset() {
+    if (zoomScale > 1.05) {
+        resetZoom();
+    } else {
+        zoomScale = 2;
+        panX = 0;
+        panY = 0;
+        applyVideoTransform();
+    }
+}
+
+async function toggleOrientation() {
+    isLandscapeLocked = !isLandscapeLocked;
+    const btn = document.getElementById("btn-rotate");
+    if (btn) {
+        btn.innerText = isLandscapeLocked ? "Yön: Yatay" : "Yatay";
+        btn.classList.toggle("active-toggle", isLandscapeLocked);
+    }
+    if (window.AndroidBridge && window.AndroidBridge.setOrientation) {
+        window.AndroidBridge.setOrientation(isLandscapeLocked ? "landscape" : "auto");
+    } else if (screen.orientation) {
+        try {
+            if (isLandscapeLocked && screen.orientation.lock) {
+                await screen.orientation.lock("landscape");
+            } else if (!isLandscapeLocked && screen.orientation.unlock) {
+                screen.orientation.unlock();
+            }
+        } catch {}
+    }
+    setTimeout(() => applyVideoTransform(), 250);
 }
 
 function toggleFullscreen() {
@@ -540,6 +653,9 @@ function getNormalizedCoords(clientX, clientY, videoEl) {
 }
 
 function updateRemoteCursor(nx, ny) {
+    cursorNx = Math.max(0, Math.min(1, nx));
+    cursorNy = Math.max(0, Math.min(1, ny));
+
     const cursorEl = document.getElementById("remote-cursor");
     const videoEl = document.getElementById("remote-video");
     const wrapperEl = document.getElementById("video-wrapper");
@@ -553,12 +669,15 @@ function updateRemoteCursor(nx, ny) {
     const offsetX = (vRect.left - wRect.left) + (vRect.width - displayW) / 2;
     const offsetY = (vRect.top - wRect.top) + (vRect.height - displayH) / 2;
 
-    const px = offsetX + Math.max(0, Math.min(1, nx)) * displayW;
-    const py = offsetY + Math.max(0, Math.min(1, ny)) * displayH;
+    const px = offsetX + cursorNx * displayW;
+    const py = offsetY + cursorNy * displayH;
 
     cursorEl.classList.remove("hidden");
     cursorEl.style.transform = `translate3d(${px - 3}px, ${py - 2}px, 0)`;
 }
+
+window.addEventListener("resize", () => updateRemoteCursor(cursorNx, cursorNy));
+window.addEventListener("orientationchange", () => setTimeout(() => applyVideoTransform(), 250));
 
 const remoteVideo = document.getElementById("remote-video");
 let moveRafPending = false;
@@ -598,10 +717,10 @@ remoteVideo.addEventListener("wheel", (e) => {
     sendControl(`SCROLL:0,${dy}`);
 }, { passive: false });
 
-// Touch support for Phones & Tablets
+// Touch support for Phones & Tablets (Direct + Trackpad + Pinch-Zoom/Pan)
 let touchStartInfo = null;
 let longPressTimer = null;
-let twoFingerLastY = null;
+let twoFingerState = null;
 
 function ensureRemoteAudioPlaying() {
     const remoteAudio = document.getElementById("remote-audio");
@@ -615,23 +734,46 @@ remoteVideo.addEventListener("touchstart", (e) => {
     ensureRemoteAudioPlaying();
     if (e.touches.length === 2) {
         clearTimeout(longPressTimer);
-        twoFingerLastY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        touchStartInfo = null;
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        twoFingerState = {
+            startDist: Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY),
+            startScale: zoomScale,
+            lastMidX: (t0.clientX + t1.clientX) / 2,
+            lastMidY: (t0.clientY + t1.clientY) / 2,
+            isPinching: zoomScale > 1.02
+        };
         return;
     }
     if (e.touches.length === 1) {
         const t = e.touches[0];
-        const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
-        touchStartInfo = { x: t.clientX, y: t.clientY, moved: false, longPressed: false };
-        if (coords) {
-            updateRemoteCursor(Number(coords.x), Number(coords.y));
-            sendControl(`MOVE:${coords.x},${coords.y}`);
+        touchStartInfo = {
+            startX: t.clientX,
+            startY: t.clientY,
+            lastX: t.clientX,
+            lastY: t.clientY,
+            moved: false,
+            longPressed: false
+        };
+
+        if (!trackpadMode) {
+            const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
+            if (coords) {
+                updateRemoteCursor(Number(coords.x), Number(coords.y));
+                sendControl(`MOVE:${coords.x},${coords.y}`);
+            }
         }
 
         longPressTimer = setTimeout(() => {
             if (touchStartInfo && !touchStartInfo.moved) {
                 touchStartInfo.longPressed = true;
-                const c = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
-                if (c) sendControl(`RCLICK:${c.x},${c.y}`);
+                if (trackpadMode) {
+                    sendControl(`RCLICK:${cursorNx.toFixed(4)},${cursorNy.toFixed(4)}`);
+                } else {
+                    const c = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
+                    if (c) sendControl(`RCLICK:${c.x},${c.y}`);
+                }
             }
         }, 500);
     }
@@ -639,25 +781,60 @@ remoteVideo.addEventListener("touchstart", (e) => {
 
 remoteVideo.addEventListener("touchmove", (e) => {
     e.preventDefault();
-    if (e.touches.length === 2 && twoFingerLastY !== null) {
-        const avgY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-        const diff = avgY - twoFingerLastY;
-        if (Math.abs(diff) > 15) {
-            sendControl(`SCROLL:0,${diff > 0 ? 120 : -120}`);
-            twoFingerLastY = avgY;
+    if (e.touches.length === 2 && twoFingerState) {
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+        const midX = (t0.clientX + t1.clientX) / 2;
+        const midY = (t0.clientY + t1.clientY) / 2;
+
+        if (Math.abs(dist - twoFingerState.startDist) > 12) {
+            twoFingerState.isPinching = true;
+        }
+
+        if (twoFingerState.isPinching || zoomScale > 1.02) {
+            const ratio = twoFingerState.startDist > 0 ? dist / twoFingerState.startDist : 1;
+            zoomScale = Math.max(1, Math.min(4, twoFingerState.startScale * ratio));
+            panX += (midX - twoFingerState.lastMidX);
+            panY += (midY - twoFingerState.lastMidY);
+            twoFingerState.lastMidX = midX;
+            twoFingerState.lastMidY = midY;
+            applyVideoTransform();
+        } else {
+            const diffY = midY - twoFingerState.lastMidY;
+            if (Math.abs(diffY) > 15) {
+                sendControl(`SCROLL:0,${diffY > 0 ? 120 : -120}`);
+                twoFingerState.lastMidY = midY;
+            }
         }
         return;
     }
     if (e.touches.length === 1 && touchStartInfo) {
         const t = e.touches[0];
-        if (Math.hypot(t.clientX - touchStartInfo.x, t.clientY - touchStartInfo.y) > 8) {
+        if (Math.hypot(t.clientX - touchStartInfo.startX, t.clientY - touchStartInfo.startY) > 6) {
             touchStartInfo.moved = true;
             clearTimeout(longPressTimer);
         }
-        const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
-        if (coords) {
-            updateRemoteCursor(Number(coords.x), Number(coords.y));
-            sendControl(`MOVE:${coords.x},${coords.y}`);
+
+        if (trackpadMode) {
+            const rect = remoteVideo.getBoundingClientRect();
+            const dx = t.clientX - touchStartInfo.lastX;
+            const dy = t.clientY - touchStartInfo.lastY;
+            touchStartInfo.lastX = t.clientX;
+            touchStartInfo.lastY = t.clientY;
+            if (rect.width > 0 && rect.height > 0) {
+                const sensitivity = 1.45;
+                const nextX = Math.max(0, Math.min(1, cursorNx + (dx * sensitivity) / rect.width));
+                const nextY = Math.max(0, Math.min(1, cursorNy + (dy * sensitivity) / rect.height));
+                updateRemoteCursor(nextX, nextY);
+                sendControl(`MOVE:${nextX.toFixed(4)},${nextY.toFixed(4)}`);
+            }
+        } else {
+            const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
+            if (coords) {
+                updateRemoteCursor(Number(coords.x), Number(coords.y));
+                sendControl(`MOVE:${coords.x},${coords.y}`);
+            }
         }
     }
 }, { passive: false });
@@ -665,15 +842,23 @@ remoteVideo.addEventListener("touchmove", (e) => {
 remoteVideo.addEventListener("touchend", (e) => {
     e.preventDefault();
     clearTimeout(longPressTimer);
-    twoFingerLastY = null;
+    if (e.touches.length < 2) {
+        twoFingerState = null;
+    }
     if (touchStartInfo && !touchStartInfo.moved && !touchStartInfo.longPressed && e.changedTouches.length === 1) {
-        const t = e.changedTouches[0];
-        const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
-        if (coords) {
-            sendControl(`${rightClickMode ? "RCLICK" : "CLICK"}:${coords.x},${coords.y}`);
+        if (trackpadMode) {
+            sendControl(`${rightClickMode ? "RCLICK" : "CLICK"}:${cursorNx.toFixed(4)},${cursorNy.toFixed(4)}`);
+        } else {
+            const t = e.changedTouches[0];
+            const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
+            if (coords) {
+                sendControl(`${rightClickMode ? "RCLICK" : "CLICK"}:${coords.x},${coords.y}`);
+            }
         }
     }
-    touchStartInfo = null;
+    if (e.touches.length === 0) {
+        touchStartInfo = null;
+    }
 }, { passive: false });
 
 // Desktop Keyboard Events
@@ -693,6 +878,16 @@ window.addEventListener("keyup", (e) => {
 
 // Mobile Virtual Keyboard Events
 const mobileKb = document.getElementById("mobile-kb-input");
+mobileKb.addEventListener("focus", () => {
+    kbOpen = true;
+    const btn = document.getElementById("btn-kb");
+    if (btn) btn.classList.add("active-toggle");
+});
+mobileKb.addEventListener("blur", () => {
+    kbOpen = false;
+    const btn = document.getElementById("btn-kb");
+    if (btn) btn.classList.remove("active-toggle");
+});
 mobileKb.addEventListener("input", (e) => {
     const val = mobileKb.value;
     if (val) {
