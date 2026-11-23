@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -206,6 +207,7 @@ class HostSession:
         self.privacy_enabled = False
         self.data_channel = None
         self.incoming_files = {}
+        self.ui_port = 8000
 
     def rotate_token(self):
         self.current_token = generate_token()
@@ -1071,7 +1073,8 @@ def get_invite_info():
 
 @eel.expose
 def regenerate_invite():
-    if not session.session_active:
+    if not session.session_active or session.pc is None:
+        session.session_active = False
         session.pending_client = None
         session.rotate_token()
     return {"room": session.room_id, "token": session.current_token}
@@ -1260,8 +1263,16 @@ def stop_session():
         asyncio.run_coroutine_threadsafe(close_peer_connection(rotate=True), session.loop)
 
 
+def find_free_port(start_port=8000):
+    for p in range(start_port, start_port + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", p)) != 0:
+                return p
+    return 0
+
+
 def open_ui_window():
-    url = "http://localhost:8000/index.html"
+    url = f"http://localhost:{session.ui_port}/index.html"
     for browser in (
         os.path.join(os.environ.get("ProgramFiles", ""), "Google", "Chrome", "Application", "chrome.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
@@ -1314,11 +1325,12 @@ def on_eel_close(_page, _sockets):
 
 # --- MAIN ---
 if __name__ == "__main__":
+    session.ui_port = find_free_port(8000)
     threading.Thread(target=start_asyncio_loop, daemon=True).start()
     threading.Thread(target=start_mqtt_worker, daemon=True).start()
     threading.Thread(target=start_tray_icon, daemon=True).start()
 
-    eel.start("index.html", size=(960, 680), port=8000, block=False, close_callback=on_eel_close)
+    eel.start("index.html", size=(960, 680), port=session.ui_port, block=False, close_callback=on_eel_close)
 
     while True:
         try:
