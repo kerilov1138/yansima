@@ -10,16 +10,7 @@ const ICE_SERVERS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-    {
-        urls: [
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:443",
-            "turn:openrelay.metered.ca:443?transport=tcp"
-        ],
-        username: "openrelayproject",
-        credential: "openrelayproject"
-    }
+    { urls: "stun:stun.cloudflare.com:3478" }
 ];
 
 let pendingIceCandidates = [];
@@ -276,7 +267,7 @@ function showHostView() {
     document.getElementById("host-view").classList.remove("hidden");
 }
 
-function on_host_session_ended() {
+async function on_host_session_ended() {
     document.getElementById("connection-modal").classList.add("hidden");
     document.getElementById("host-view").classList.add("hidden");
     document.getElementById("dashboard").classList.remove("hidden");
@@ -294,6 +285,14 @@ function on_host_session_ended() {
     }
     const hChat = document.getElementById("host-chat-messages");
     if (hChat) hChat.innerHTML = "";
+    if (isDesktopApp) {
+        try {
+            const info = await eel.get_invite_info()();
+            if (info && info.token) {
+                update_invite_ui(info.room, info.token);
+            }
+        } catch {}
+    }
 }
 
 function toggleHostPrivacy() {
@@ -505,6 +504,10 @@ async function initWebRTCClient(toHostTopic, token) {
                 clearTimeout(disconnectGraceTimer);
                 disconnectGraceTimer = null;
             }
+            const rv = document.getElementById("remote-video");
+            if (rv && rv.paused && rv.srcObject) {
+                rv.play().catch(() => {});
+            }
         } else if (state === "disconnected") {
             if (!disconnectGraceTimer) {
                 disconnectGraceTimer = setTimeout(() => {
@@ -639,12 +642,29 @@ async function initWebRTCClient(toHostTopic, token) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
+    // Wait briefly (up to 1.2s) for STUN srflx candidates so offer.sdp includes them directly
+    await new Promise((resolve) => {
+        if (pc.iceGatheringState === "complete") {
+            resolve();
+            return;
+        }
+        const timer = setTimeout(resolve, 1200);
+        const onGather = () => {
+            if (pc.iceGatheringState === "complete") {
+                clearTimeout(timer);
+                pc.removeEventListener("icegatheringstatechange", onGather);
+                resolve();
+            }
+        };
+        pc.addEventListener("icegatheringstatechange", onGather);
+    });
+
     mqttClient.publish(toHostTopic, JSON.stringify({
         type: "offer",
         clientId,
         token,
-        sdp: offer.sdp,
-        sdpType: offer.type
+        sdp: pc.localDescription.sdp,
+        sdpType: pc.localDescription.type
     }));
 }
 

@@ -79,15 +79,6 @@ STUN_SERVERS = [
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     RTCIceServer(urls=["stun:stun.cloudflare.com:3478"]),
-    RTCIceServer(
-        urls=[
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:443",
-            "turn:openrelay.metered.ca:443?transport=tcp",
-        ],
-        username="openrelayproject",
-        credential="openrelayproject",
-    ),
 ]
 
 AUDIO_SAMPLE_RATE = 48000
@@ -928,13 +919,17 @@ async def handle_remote_ice(cand_dict):
         parts = cand_str.replace("candidate:", "").split()
         if len(parts) < 8:
             return
+        ip = parts[4]
+        proto = parts[2]
+        if ip.endswith(".local") or proto.lower() != "udp":
+            return
         cand = RTCIceCandidate(
             component=int(parts[1]),
             foundation=parts[0],
-            ip=parts[4],
+            ip=ip,
             port=int(parts[5]),
             priority=int(parts[3]),
-            protocol=parts[2],
+            protocol=proto,
             type=parts[7],
             sdpMid=cand_dict.get("sdpMid"),
             sdpMLineIndex=cand_dict.get("sdpMLineIndex"),
@@ -1103,10 +1098,12 @@ def get_invite_info():
 
 @eel.expose
 def regenerate_invite():
-    if session.pc is None or not session.session_active or session.pc.connectionState in ("closed", "failed"):
-        session.session_active = False
-        session.pending_client = None
-        session.rotate_token()
+    if session.pc is not None and session.loop is not None:
+        asyncio.run_coroutine_threadsafe(close_peer_connection(rotate=False), session.loop)
+    session.session_active = False
+    session.pending_client = None
+    session.active_client_id = None
+    session.rotate_token()
     return {"room": session.room_id, "token": session.current_token}
 
 
