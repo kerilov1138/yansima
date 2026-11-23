@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.pyc
+build/
+dist/
+YENI/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+.DS_Store

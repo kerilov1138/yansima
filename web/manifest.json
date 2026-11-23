@@ -1,0 +1,9 @@
+{
+  "name": "Yansıma - Uzak Masaüstü",
+  "short_name": "Yansıma",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#1e1e1e",
+  "theme_color": "#1e1e1e",
+  "description": "WebRTC tabanlı ücretsiz uzak masaüstü ve destek uygulaması"
+}

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Yansıma - Uzak Masaüstü</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#1e1e1e">
+    <script type="text/javascript" src="/eel.js" onerror="window.__NO_EEL__=true"></script>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+</head>
+
+<body>
+    <!-- Login / Dashboard Screen -->
+    <div class="container" id="dashboard">
+        <div class="sidebar">
+            <div class="logo-area">
+                <h1>Yansıma</h1>
+                <p>WebRTC Uzak Masaüstü</p>
+            </div>
+            <div class="status-block">
+                <div class="status-indicator" id="status-indicator">
+                    <span class="dot" id="status-dot"></span>
+                    <span id="status-text">Hazırlanıyor...</span>
+                </div>
+                <p class="mode-badge" id="mode-badge">Mod algılanıyor...</p>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Host Card (Visible only in Desktop Eel App) -->
+            <div class="card local-card" id="host-card">
+                <div class="card-header-row">
+                    <div>
+                        <h2>Bu Bilgisayar (Ekran Paylaş)</h2>
+                        <p class="description">Tek seferlik davet linkini veya kodu karşı tarafa gönderin.</p>
+                    </div>
+                    <button class="secondary-btn" onclick="regenerateInvite()" title="Yeni Tek Seferlik Link Üret">Yenile</button>
+                </div>
+
+                <div class="id-display-container">
+                    <label>Tek Seferlik Davet Linki (Telefon / Tablet / PC)</label>
+                    <div class="id-box">
+                        <input type="text" id="invite-link" readonly value="Hazırlanıyor...">
+                        <button class="copy-btn" onclick="copyText('invite-link', this)" title="Linki Kopyala">
+                            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="pages-url-row">
+                        <input type="text" id="pages-base-url" placeholder="GitHub Pages URL (ör: https://adiniz.github.io/yansima/)" onchange="savePagesBaseUrl()">
+                    </div>
+                </div>
+
+                <div class="credentials-row">
+                    <div>
+                        <label>Oda Kodu</label>
+                        <input type="text" id="my-room" readonly value="...">
+                    </div>
+                    <div>
+                        <label>Tek Seferlik Şifre</label>
+                        <input type="text" id="my-token" readonly value="...">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Client Connect Card (Visible on Both Desktop App and Mobile/Browser) -->
+            <div class="card remote-card">
+                <h2>Uzak Bilgisayara Bağlan</h2>
+                <p class="description">Oda kodu ve tek seferlik şifreyi girin ya da davet linkini açın.</p>
+                <div class="connect-container">
+                    <div class="credentials-row">
+                        <div>
+                            <label>Oda Kodu</label>
+                            <input type="text" id="remote-room" placeholder="Örn: 483-920-104">
+                        </div>
+                        <div>
+                            <label>Tek Seferlik Şifre</label>
+                            <input type="text" id="remote-token" placeholder="Örn: a7K9mP2x">
+                        </div>
+                    </div>
+                    <button id="connect-btn" onclick="connectToPeer()">Bağlan</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote Screen View (Hidden by default) -->
+    <div id="remote-view" class="hidden">
+        <div class="toolbar">
+            <div class="toolbar-left">
+                <span class="conn-badge">Canlı</span>
+                <button id="btn-mic" onclick="toggleMic()">Mikrofon: Kapalı</button>
+                <button id="btn-spk" onclick="toggleSpk()">Hoparlör: Açık</button>
+            </div>
+            <div class="toolbar-right">
+                <button id="btn-rclick" class="mobile-only-btn" onclick="toggleRightClickMode()">Sağ Tık: Kapalı</button>
+                <button id="btn-kb" onclick="focusMobileKeyboard()">Klavye</button>
+                <button onclick="toggleFullscreen()">Tam Ekran</button>
+                <button onclick="disconnect()" class="btn-danger">Bağlantıyı Kes</button>
+            </div>
+        </div>
+        <div class="video-wrapper" id="video-wrapper">
+            <video id="remote-video" autoplay playsinline muted></video>
+            <audio id="remote-audio" autoplay playsinline></audio>
+        </div>
+        <input type="text" id="mobile-kb-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-hidden="true">
+    </div>
+
+    <!-- Connection Request Modal (Host) -->
+    <div id="connection-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Bağlantı İsteği</h3>
+            <p><strong id="requester-info">Uzak Cihaz</strong> ekranınıza bağlanmak istiyor.</p>
+            <div class="modal-actions">
+                <button onclick="respondConnection(true)" class="btn-accept">Kabul Et</button>
+                <button onclick="respondConnection(false)" class="btn-deny">Reddet</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Waiting Modal (Client) -->
+    <div id="waiting-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Bağlantı Kuruluyor</h3>
+            <div class="status-indicator" style="justify-content: center; margin: 20px 0;">
+                <span class="dot" style="animation: pulse 1s infinite;"></span>
+                <span id="waiting-text">Karşı tarafın onayı bekleniyor...</span>
+            </div>
+            <button onclick="cancelConnection()" class="btn-deny" style="margin-top: 10px;">İptal</button>
+        </div>
+    </div>
+
+    <!-- Host Active Session View -->
+    <div id="host-view" class="hidden">
+        <div class="container host-active-box">
+            <div class="host-active-header">
+                <h2>Oturum Aktif</h2>
+                <p>Ekranınız şifreli WebRTC ile paylaşılıyor</p>
+            </div>
+            <div class="host-active-controls">
+                <button id="btn-mic-host" onclick="toggleHostMic()">Mikrofon: Açık</button>
+                <button id="btn-spk-host" onclick="toggleHostSpk()">Hoparlör: Açık</button>
+            </div>
+            <div class="host-active-footer">
+                <button onclick="stopHostSession()" class="btn-danger" style="width: 100%; padding: 12px;">Oturumu Sonlandır</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

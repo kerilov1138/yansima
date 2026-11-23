@@ -1,0 +1,9 @@
+eel
+mss
+pyautogui
+Pillow
+sounddevice
+numpy
+aiortc
+av
+paho-mqtt

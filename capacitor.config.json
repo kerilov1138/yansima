@@ -1,0 +1,8 @@
+{
+  "appId": "com.yansima.remotedesktop",
+  "appName": "Yansima",
+  "webDir": "web",
+  "android": {
+    "allowMixedContent": true
+  }
+}
