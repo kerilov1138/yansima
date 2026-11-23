@@ -19,3 +19,9 @@ python main.py
    - Oluşan URL örneği: `https://kullaniciadiniz.github.io/yansima/`
 3. Masaüstü uygulamasını açtığınızda **"GitHub Pages URL"** kutusuna bu adresi bir kez yapıştırın (otomatik kaydedilir).
 4. Tek tıkla `.exe` üretmek için `build_exe.bat` dosyasını çalıştırın ve `dist/Yansima.exe` dosyasını **GitHub Releases** üzerinden paylaşın.
+
+## Kullanım Sorumluluğu
+Bu yazılımı yalnızca kendi cihazlarınızda veya karşı tarafın açık rızasıyla uzaktan destek ve eğitim amaçlı kullanın. Her bağlantı tek seferlik şifre ve ana bilgisayar onayı gerektirir.
+
+## Lisans
+Bu proje [MIT Lisansı](LICENSE) ile lisanslanmıştır.
