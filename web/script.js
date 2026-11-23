@@ -40,6 +40,9 @@ let lastLocalCursorTs = 0;
 let hostMicState = true;
 let hostSpkState = true;
 let hostCtrlState = true;
+let hostPrivacyState = false;
+let clientPrivacyState = false;
+let clientChatUnread = 0;
 let clientReadOnly = false;
 
 // --- INITIALIZATION ---
@@ -99,6 +102,8 @@ if (isDesktopApp) {
     eel.expose(show_connection_request);
     eel.expose(showHostView);
     eel.expose(on_host_session_ended);
+    eel.expose(on_host_chat_message);
+    eel.expose(on_host_privacy_state);
 }
 
 function update_mqtt_status(online, text) {
@@ -257,9 +262,56 @@ function on_host_session_ended() {
     hostMicState = true;
     hostSpkState = true;
     hostCtrlState = true;
+    hostPrivacyState = false;
     updateBtn("btn-mic-host", true, "Mikrofon");
     updateBtn("btn-spk-host", true, "Hoparlör");
     updateBtn("btn-ctrl-host", true, "Kontrol");
+    const privBtn = document.getElementById("btn-privacy-host");
+    if (privBtn) {
+        privBtn.innerText = "Perde: Kapalı";
+        privBtn.classList.remove("active-toggle");
+    }
+    const hChat = document.getElementById("host-chat-messages");
+    if (hChat) hChat.innerHTML = "";
+}
+
+function toggleHostPrivacy() {
+    hostPrivacyState = !hostPrivacyState;
+    on_host_privacy_state(hostPrivacyState);
+    if (isDesktopApp) eel.set_privacy_screen(hostPrivacyState);
+}
+
+function on_host_privacy_state(enabled) {
+    hostPrivacyState = Boolean(enabled);
+    const btn = document.getElementById("btn-privacy-host");
+    if (btn) {
+        btn.innerText = hostPrivacyState ? "Perde: Açık" : "Perde: Kapalı";
+        btn.classList.toggle("active-toggle", hostPrivacyState);
+    }
+}
+
+function appendChatMessage(containerId, sender, text, isSelf) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    const div = document.createElement("div");
+    div.className = `chat-msg ${isSelf ? "self" : "peer"}`;
+    div.textContent = `${isSelf ? "Ben" : sender}: ${text}`;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+}
+
+function on_host_chat_message(sender, text) {
+    appendChatMessage("host-chat-messages", sender, text, false);
+}
+
+function sendHostChat() {
+    const inp = document.getElementById("host-chat-input");
+    if (!inp) return;
+    const txt = inp.value.trim();
+    if (!txt) return;
+    inp.value = "";
+    appendChatMessage("host-chat-messages", "Ben", txt, true);
+    if (isDesktopApp) eel.host_send_chat(txt);
 }
 
 function toggleHostMic() {
@@ -487,6 +539,26 @@ async function initWebRTCClient(toHostTopic, token) {
                 a.remove();
                 setTimeout(() => URL.revokeObjectURL(url), 5000);
             }
+        } else if (event.data.startsWith("CHAT:")) {
+            try {
+                const b64 = event.data.slice(5);
+                const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                const text = new TextDecoder().decode(bytes);
+                appendChatMessage("client-chat-messages", "PC", text, false);
+                const panel = document.getElementById("client-chat-box");
+                if (panel && panel.classList.contains("hidden")) {
+                    clientChatUnread++;
+                    const badge = document.getElementById("chat-unread-badge");
+                    if (badge) {
+                        badge.innerText = clientChatUnread;
+                        badge.classList.remove("hidden");
+                    }
+                }
+            } catch {}
+        } else if (event.data.startsWith("PRIVACY:")) {
+            clientPrivacyState = event.data.slice(8) === "on";
+            const btn = document.getElementById("btn-privacy-client");
+            if (btn) btn.classList.toggle("active-toggle", clientPrivacyState);
         }
     };
     dc.onclose = () => {
@@ -593,6 +665,14 @@ function cleanupClient(alertMsg) {
 
     document.getElementById("shortcut-drawer")?.classList.add("hidden");
     document.getElementById("btn-shortcuts")?.classList.remove("active-toggle");
+    document.getElementById("client-chat-box")?.classList.add("hidden");
+    document.getElementById("btn-chat")?.classList.remove("active-toggle");
+    const cMsgs = document.getElementById("client-chat-messages");
+    if (cMsgs) cMsgs.innerHTML = "";
+    clientChatUnread = 0;
+    document.getElementById("chat-unread-badge")?.classList.add("hidden");
+    clientPrivacyState = false;
+    document.getElementById("btn-privacy-client")?.classList.remove("active-toggle");
     clientReadOnly = false;
     const badge = document.querySelector(".conn-badge");
     if (badge) {
@@ -656,6 +736,14 @@ async function toggleMic() {
             console.warn("Mikrofon izni alınamadı:", err);
             document.getElementById("shortcut-drawer")?.classList.add("hidden");
     document.getElementById("btn-shortcuts")?.classList.remove("active-toggle");
+    document.getElementById("client-chat-box")?.classList.add("hidden");
+    document.getElementById("btn-chat")?.classList.remove("active-toggle");
+    const cMsgs = document.getElementById("client-chat-messages");
+    if (cMsgs) cMsgs.innerHTML = "";
+    clientChatUnread = 0;
+    document.getElementById("chat-unread-badge")?.classList.add("hidden");
+    clientPrivacyState = false;
+    document.getElementById("btn-privacy-client")?.classList.remove("active-toggle");
     clientReadOnly = false;
     const badge = document.querySelector(".conn-badge");
     if (badge) {
@@ -701,6 +789,45 @@ function toggleTouchMode() {
         btn.innerText = trackpadMode ? "Fare: Trackpad" : "Fare: Dokunmatik";
         btn.classList.toggle("active-toggle", trackpadMode);
     }
+}
+
+function toggleClientChat() {
+    const panel = document.getElementById("client-chat-box");
+    const btn = document.getElementById("btn-chat");
+    if (!panel) return;
+    const willOpen = panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", !willOpen);
+    if (btn) btn.classList.toggle("active-toggle", willOpen);
+    if (willOpen) {
+        clientChatUnread = 0;
+        const badge = document.getElementById("chat-unread-badge");
+        if (badge) badge.classList.add("hidden");
+        document.getElementById("client-chat-input")?.focus();
+    }
+}
+
+function sendClientChat() {
+    const inp = document.getElementById("client-chat-input");
+    if (!inp) return;
+    const txt = inp.value.trim();
+    if (!txt) return;
+    inp.value = "";
+    appendChatMessage("client-chat-messages", "Ben", txt, true);
+    const bytes = new TextEncoder().encode(txt);
+    let bin = "";
+    bytes.forEach(b => { bin += String.fromCharCode(b); });
+    sendControl(`CHAT:${btoa(bin)}`);
+}
+
+function toggleClientPrivacy() {
+    if (clientReadOnly) {
+        alert("Salt okunur moddasınız.");
+        return;
+    }
+    clientPrivacyState = !clientPrivacyState;
+    const btn = document.getElementById("btn-privacy-client");
+    if (btn) btn.classList.toggle("active-toggle", clientPrivacyState);
+    sendControl(`PRIVACY:${clientPrivacyState ? "on" : "off"}`);
 }
 
 function toggleShortcutsDrawer() {

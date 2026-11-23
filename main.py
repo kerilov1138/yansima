@@ -203,6 +203,7 @@ class HostSession:
         self.max_width = 1920
         self.target_fps = 30
         self.audio_source = "both"  # "mic", "system", "both"
+        self.privacy_enabled = False
         self.data_channel = None
         self.incoming_files = {}
 
@@ -544,6 +545,70 @@ async def play_remote_audio(track):
                 pass
 
 
+# --- PRIVACY SCREEN OVERLAY (WINDOWS) ---
+class PrivacyScreenManager:
+    def __init__(self):
+        self._proc = None
+        self._stop_evt = None
+        self._thread = None
+
+    def set_enabled(self, enabled):
+        if sys.platform != "win32":
+            return False
+        if enabled:
+            if self._thread and self._thread.is_alive():
+                return True
+            self._stop_evt = threading.Event()
+            self._thread = threading.Thread(target=self._run_overlay, daemon=True)
+            self._thread.start()
+            return True
+        else:
+            if self._stop_evt:
+                self._stop_evt.set()
+            return False
+
+    def _run_overlay(self):
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.overrideredirect(True)
+            root.configure(bg="black")
+            root.attributes("-topmost", True)
+            with mss.mss() as sct:
+                m = sct.monitors[0]
+                root.geometry(f"{m['width']}x{m['height']}+{m['left']}+{m['top']}")
+            root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
+
+            # Exclude from screen capture (WDA_EXCLUDEFROMCAPTURE = 0x11)
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+
+            # Click-through & no-activate so remote mouse/keyboard pass through
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_NOACTIVATE = 0x08000000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE
+            )
+
+            def _poll():
+                if self._stop_evt and self._stop_evt.is_set():
+                    root.destroy()
+                    return
+                root.after(100, _poll)
+
+            root.after(100, _poll)
+            root.mainloop()
+        except Exception as e:
+            print(f"[PRIVACY] Ekran karartma hatası: {e}")
+
+
+privacy_screen = PrivacyScreenManager()
+
+
 # --- CLIPBOARD HELPERS (WINDOWS) ---
 def get_windows_clipboard():
     if sys.platform != "win32":
@@ -616,6 +681,22 @@ def process_control_command(cmd_str, channel=None):
                 set_windows_clipboard(txt)
             except Exception:
                 pass
+            return
+
+        if cmd == "CHAT":
+            try:
+                txt = base64.b64decode(val.encode("ascii")).decode("utf-8")
+                ui_queue.put(("chat_msg", "Uzak Cihaz", txt))
+            except Exception:
+                pass
+            return
+
+        if cmd == "PRIVACY":
+            if session.control_enabled:
+                enabled = val == "on"
+                session.privacy_enabled = enabled
+                privacy_screen.set_enabled(enabled)
+                ui_queue.put(("privacy_state", enabled))
             return
 
         if cmd == "FILE_START":
@@ -853,6 +934,8 @@ async def close_peer_connection(rotate=True):
     session.pending_client = None
     session.data_channel = None
     session.control_enabled = True
+    session.privacy_enabled = False
+    privacy_screen.set_enabled(False)
     session.mic_enabled = True
     session.spk_enabled = True
 
@@ -1025,6 +1108,25 @@ def set_stream_settings(monitor_idx, quality):
 def set_audio_source(src):
     if src in ("mic", "system", "both"):
         session.audio_source = src
+
+
+@eel.expose
+def set_privacy_screen(enabled):
+    session.privacy_enabled = bool(enabled)
+    privacy_screen.set_enabled(session.privacy_enabled)
+    if session.data_channel and session.data_channel.readyState == "open" and session.loop:
+        msg = f"PRIVACY:{'on' if session.privacy_enabled else 'off'}"
+        session.loop.call_soon_threadsafe(session.data_channel.send, msg)
+
+
+@eel.expose
+def host_send_chat(text):
+    if not text or not session.data_channel or session.data_channel.readyState != "open":
+        return False
+    b64 = base64.b64encode(str(text).encode("utf-8")).decode("ascii")
+    if session.loop:
+        session.loop.call_soon_threadsafe(session.data_channel.send, f"CHAT:{b64}")
+    return True
 
 
 @eel.expose
@@ -1227,6 +1329,10 @@ if __name__ == "__main__":
                     eel.showHostView()()
                 elif ev[0] == "host_ended":
                     eel.on_host_session_ended()()
+                elif ev[0] == "chat_msg":
+                    eel.on_host_chat_message(ev[1], ev[2])()
+                elif ev[0] == "privacy_state":
+                    eel.on_host_privacy_state(ev[1])()
         except Exception:
             pass
         eel.sleep(0.05)

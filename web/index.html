@@ -138,6 +138,7 @@
                 <button id="btn-zoom" onclick="toggleZoomReset()">Yakınlaştır: 1x</button>
                 <button id="btn-rotate" class="mobile-only-btn" onclick="toggleOrientation()">Yatay</button>
                 <button id="btn-shortcuts" onclick="toggleShortcutsDrawer()">Kısayollar</button>
+                <button id="btn-chat" onclick="toggleClientChat()">Sohbet <span id="chat-unread-badge" class="chat-badge hidden">0</span></button>
                 <button id="btn-kb" onclick="toggleMobileKeyboard()">Klavye</button>
                 <button onclick="toggleFullscreen()">Tam Ekran</button>
                 <button onclick="disconnect()" class="btn-danger">Bağlantıyı Kes</button>
@@ -158,12 +159,24 @@
             <button class="clip-btn" onclick="sendClipboardToHost()">Panoyu Gönder</button>
             <button class="clip-btn" onclick="requestClipboardFromHost()">Panoyu Al</button>
             <button class="clip-btn" onclick="triggerClientFileUpload()">Dosya Gönder</button>
+            <button id="btn-privacy-client" onclick="toggleClientPrivacy()">Gizlilik Perdesi</button>
         </div>
         <input type="file" id="client-file-input" class="hidden" onchange="handleClientFileSelected(this)">
         <div class="video-wrapper" id="video-wrapper">
             <video id="remote-video" autoplay playsinline muted></video>
             <audio id="remote-audio" autoplay playsinline></audio>
             <button id="btn-exit-fs" class="exit-fs-btn hidden" onclick="toggleFullscreen()">Tam Ekrandan Çık</button>
+            <div id="client-chat-box" class="mini-chat-panel hidden">
+                <div class="mini-chat-header">
+                    <span>Oturum Sohbeti</span>
+                    <button onclick="toggleClientChat()" class="mini-chat-close">✕</button>
+                </div>
+                <div id="client-chat-messages" class="mini-chat-messages"></div>
+                <div class="mini-chat-input-row">
+                    <input type="text" id="client-chat-input" placeholder="Mesaj yaz..." onkeydown="if(event.key==='Enter')sendClientChat()">
+                    <button onclick="sendClientChat()">Gönder</button>
+                </div>
+            </div>
             <div id="remote-cursor" class="remote-cursor hidden" aria-hidden="true">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
                     <path d="M4 2L19 12.5L12 14L9.5 21L4 2Z" fill="#ffffff" stroke="#111111" stroke-width="1.8" stroke-linejoin="round"/>
@@ -209,8 +222,9 @@
                 <button id="btn-mic-host" onclick="toggleHostMic()">Mikrofon: Açık</button>
                 <button id="btn-spk-host" onclick="toggleHostSpk()">Hoparlör: Açık</button>
                 <button id="btn-ctrl-host" class="active-toggle" onclick="toggleHostControl()">Kontrol: Açık</button>
+                <button id="btn-privacy-host" onclick="toggleHostPrivacy()">Perde: Kapalı</button>
             </div>
-            <div style="padding: 0 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <div style="padding: 0 20px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
                 <select id="live-monitor" onchange="applyLiveStreamSettings()">
                     <option value="1">Ana Ekran</option>
                 </select>
@@ -226,6 +240,13 @@
                     <option value="mic">Ses: Sadece Mikrofon</option>
                 </select>
                 <button class="secondary-btn" onclick="hostSendFile()" style="padding: 10px;">Dosya Gönder</button>
+            </div>
+            <div class="host-chat-box">
+                <div id="host-chat-messages" class="mini-chat-messages" style="height: 110px;"></div>
+                <div class="mini-chat-input-row">
+                    <input type="text" id="host-chat-input" placeholder="Karşı tarafa mesaj yaz..." onkeydown="if(event.key==='Enter')sendHostChat()">
+                    <button onclick="sendHostChat()">Gönder</button>
+                </div>
             </div>
             <div class="host-active-footer">
                 <button onclick="stopHostSession()" class="btn-danger" style="width: 100%; padding: 12px;">Oturumu Sonlandır</button>
