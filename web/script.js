@@ -60,6 +60,9 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
             const monitors = await eel.get_monitors()();
             populateMonitorSelects(monitors);
+            const autoStart = await eel.get_autostart()();
+            const chk = document.getElementById("chk-autostart");
+            if (chk) chk.checked = Boolean(autoStart);
         } catch (e) {
             console.error("Eel init hatası:", e);
         }
@@ -131,7 +134,39 @@ function refreshInviteLink() {
     const base = baseInput || "https://kerilov1138.github.io/yansima/";
     const sep = base.includes("?") ? "&" : "?";
     const cleanRoom = (currentRoom || "").replace(/\D/g, "");
-    document.getElementById("invite-link").value = `${base}${sep}room=${cleanRoom}&token=${currentToken}`;
+    const fullLink = `${base}${sep}room=${cleanRoom}&token=${currentToken}`;
+    document.getElementById("invite-link").value = fullLink;
+
+    const qrBox = document.getElementById("invite-qr");
+    if (qrBox && typeof QRCode !== "undefined" && cleanRoom && currentToken) {
+        qrBox.innerHTML = "";
+        new QRCode(qrBox, {
+            text: fullLink,
+            width: 84,
+            height: 84,
+            colorDark: "#111111",
+            colorLight: "#ffffff",
+            correctLevel: QRCode.CorrectLevel.M
+        });
+    }
+}
+
+function toggleAutostart(enabled) {
+    if (isDesktopApp) {
+        eel.set_autostart(Boolean(enabled));
+    }
+}
+
+function applyAudioSource() {
+    if (!isDesktopApp) return;
+    const src = document.getElementById("live-audio-source")?.value || "both";
+    eel.set_audio_source(src);
+}
+
+function hostSendFile() {
+    if (isDesktopApp) {
+        eel.host_send_file();
+    }
 }
 
 function regenerateInvite() {
@@ -392,6 +427,8 @@ async function initWebRTCClient(toHostTopic, token) {
     // DataChannel for mouse, touch, keyboard & cursor sync
     dc = pc.createDataChannel("control", { ordered: true });
     dc.onopen = () => console.log("Kontrol kanalı açıldı.");
+    const incomingClientFiles = {};
+
     dc.onmessage = async (event) => {
         if (typeof event.data !== "string") return;
         if (event.data.startsWith("CURSOR:")) {
@@ -418,6 +455,37 @@ async function initWebRTCClient(toHostTopic, token) {
                 alert("PC panosu kopyalandı.");
             } catch {
                 alert("Pano okunamadı.");
+            }
+        } else if (event.data.startsWith("FILE_START:")) {
+            const parts = event.data.slice(11).split(":");
+            const fid = parts[0];
+            const fname = parts[1] || "dosya";
+            incomingClientFiles[fid] = { name: fname, chunks: [] };
+        } else if (event.data.startsWith("FILE_CHUNK:")) {
+            const rest = event.data.slice(11);
+            const sep = rest.indexOf(":");
+            if (sep > 0) {
+                const fid = rest.slice(0, sep);
+                const b64 = rest.slice(sep + 1);
+                const entry = incomingClientFiles[fid];
+                if (entry) {
+                    entry.chunks.push(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+                }
+            }
+        } else if (event.data.startsWith("FILE_END:")) {
+            const fid = event.data.slice(9);
+            const entry = incomingClientFiles[fid];
+            delete incomingClientFiles[fid];
+            if (entry) {
+                const blob = new Blob(entry.chunks);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = entry.name;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
             }
         }
     };
@@ -678,6 +746,96 @@ async function sendClipboardToHost() {
 
 function requestClipboardFromHost() {
     sendControl("CLIP_GET");
+}
+
+function triggerClientFileUpload() {
+    const inp = document.getElementById("client-file-input");
+    if (inp) {
+        inp.value = "";
+        inp.click();
+    }
+}
+
+async function handleClientFileSelected(input) {
+    const file = input.files && input.files[0];
+    if (!file || !dc || dc.readyState !== "open") return;
+    const fid = Math.random().toString(36).slice(2, 10);
+    const safeName = file.name.replace(/:/g, "_");
+    sendControl(`FILE_START:${fid}:${safeName}:${file.size}`);
+    const chunkSize = 24576;
+    for (let offset = 0; offset < file.size; offset += chunkSize) {
+        const buf = new Uint8Array(await file.slice(offset, offset + chunkSize).arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+        sendControl(`FILE_CHUNK:${fid}:${btoa(bin)}`);
+        await new Promise(r => setTimeout(r, 5));
+    }
+    sendControl(`FILE_END:${fid}`);
+    alert(`Dosya gönderildi: ${file.name}`);
+}
+
+let qrStream = null;
+let qrTimer = null;
+
+async function openQrScanner() {
+    const modal = document.getElementById("qr-modal");
+    const video = document.getElementById("qr-video");
+    const canvas = document.getElementById("qr-canvas");
+    if (!modal || !video) return;
+
+    try {
+        qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = qrStream;
+        await video.play();
+        modal.classList.remove("hidden");
+
+        const detector = ("BarcodeDetector" in window) ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+        qrTimer = setInterval(async () => {
+            if (!video.videoWidth || !video.videoHeight) return;
+            try {
+                let rawValue = null;
+                if (detector) {
+                    const codes = await detector.detect(video);
+                    if (codes.length > 0) rawValue = codes[0].rawValue;
+                } else if (typeof jsQR !== "undefined" && canvas) {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    const ctx = canvas.getContext("2d");
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const code = jsQR(imgData.data, imgData.width, imgData.height);
+                    if (code) rawValue = code.data;
+                }
+                if (rawValue) {
+                    const url = new URL(rawValue);
+                    const r = url.searchParams.get("room");
+                    const t = url.searchParams.get("token");
+                    if (r && t) {
+                        closeQrScanner();
+                        document.getElementById("remote-room").value = r;
+                        document.getElementById("remote-token").value = t;
+                        connectToPeer();
+                    }
+                }
+            } catch {}
+        }, 180);
+    } catch {
+        alert("Kamera izni alınamadı veya kamera bulunamadı.");
+    }
+}
+
+function closeQrScanner() {
+    if (qrTimer) {
+        clearInterval(qrTimer);
+        qrTimer = null;
+    }
+    if (qrStream) {
+        qrStream.getTracks().forEach(t => t.stop());
+        qrStream = null;
+    }
+    const video = document.getElementById("qr-video");
+    if (video) video.srcObject = null;
+    document.getElementById("qr-modal")?.classList.add("hidden");
 }
 
 function toggleMobileKeyboard() {

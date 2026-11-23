@@ -7,10 +7,12 @@ import json
 import os
 import queue
 import secrets
+import subprocess
 import sys
 import threading
 import time
 import uuid
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 
 import eel
@@ -18,6 +20,7 @@ import mss
 import numpy as np
 import paho.mqtt.client as mqtt
 import pyautogui
+import pystray
 import sounddevice as sd
 from aiortc import (
     MediaStreamTrack,
@@ -25,10 +28,24 @@ from aiortc import (
     RTCIceCandidate,
     RTCIceServer,
     RTCPeerConnection,
+    RTCRtpSender,
     RTCSessionDescription,
 )
 from av import AudioFrame, AudioResampler, VideoFrame
 from PIL import Image
+
+try:
+    import dxcam
+except Exception:
+    dxcam = None
+
+try:
+    import pyaudiowpatch as pyaudio_wp
+except Exception:
+    pyaudio_wp = None
+
+if sys.platform == "win32":
+    import winreg
 
 # --- PYTHONW / NO-CONSOLE SAFE STREAMS ---
 if sys.stdout is None:
@@ -184,8 +201,10 @@ class HostSession:
         self.control_enabled = True
         self.monitor_index = 1
         self.max_width = 1920
-        self.target_fps = 25
+        self.target_fps = 30
+        self.audio_source = "both"  # "mic", "system", "both"
         self.data_channel = None
+        self.incoming_files = {}
 
     def rotate_token(self):
         self.current_token = generate_token()
@@ -203,32 +222,78 @@ class ScreenVideoTrack(MediaStreamTrack):
         super().__init__()
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._sct = None
+        self._dx = None
+        self._dx_idx = None
+        self._dx_failed = False
+        self._last_rgb = None
         self._start_time = None
         self._frame_count = 0
 
+    def _ensure_dxcam(self, monitor_idx):
+        if dxcam is None or self._dx_failed or monitor_idx <= 0:
+            return None
+        target_idx = monitor_idx - 1
+        if self._dx is not None and self._dx_idx == target_idx:
+            return self._dx
+        if self._dx is not None:
+            try:
+                del self._dx
+            except Exception:
+                pass
+            self._dx = None
+        try:
+            self._dx = dxcam.create(output_idx=target_idx, output_color="RGB")
+            self._dx_idx = target_idx
+            return self._dx
+        except Exception as e:
+            print(f"[DXGI] dxcam başlatılamadı, mss kullanılacak: {e}")
+            self._dx_failed = True
+            self._dx = None
+            return None
+
     def _grab_frame(self):
+        idx = session.monitor_index
+        max_w = session.max_width
+
+        dx = self._ensure_dxcam(idx)
+        if dx is not None:
+            try:
+                arr = dx.grab()
+                if arr is not None:
+                    h, w = arr.shape[0], arr.shape[1]
+                    if w > max_w:
+                        img = Image.fromarray(arr)
+                        new_h = int(h * (max_w / w))
+                        arr = np.asarray(img.resize((max_w, new_h), Image.Resampling.BILINEAR))
+                    self._last_rgb = np.ascontiguousarray(arr)
+                    return self._last_rgb
+                elif self._last_rgb is not None:
+                    return self._last_rgb
+            except Exception:
+                self._dx_failed = True
+
         if self._sct is None:
             self._sct = mss.mss()
         monitors = self._sct.monitors
-        idx = session.monitor_index
         if idx < 0 or idx >= len(monitors):
             idx = 1 if len(monitors) > 1 else 0
         monitor = monitors[idx]
         raw = self._sct.grab(monitor)
-        max_w = session.max_width
         if raw.width > max_w:
             img = Image.frombytes("RGB", raw.size, raw.rgb)
             new_h = int(raw.height * (max_w / raw.width))
             img = img.resize((max_w, new_h), Image.Resampling.BILINEAR)
-            return np.asarray(img)
+            self._last_rgb = np.asarray(img)
+            return self._last_rgb
         arr = np.frombuffer(raw.rgb, dtype=np.uint8).reshape((raw.height, raw.width, 3))
-        return np.ascontiguousarray(arr)
+        self._last_rgb = np.ascontiguousarray(arr)
+        return self._last_rgb
 
     async def recv(self):
         if self._start_time is None:
             self._start_time = time.time()
 
-        fps = max(10, min(30, session.target_fps))
+        fps = max(10, min(60, session.target_fps))
         target_t = self._start_time + (self._frame_count / float(fps))
         delay = target_t - time.time()
         if delay > 0:
@@ -237,13 +302,19 @@ class ScreenVideoTrack(MediaStreamTrack):
         loop = asyncio.get_running_loop()
         rgb = await loop.run_in_executor(self._executor, self._grab_frame)
         frame = VideoFrame.from_ndarray(rgb, format="rgb24")
-        frame.pts = self._frame_count * 3600  # 90kHz / 25fps
+        frame.pts = self._frame_count * 1500  # 90kHz base
         frame.time_base = fractions.Fraction(1, 90000)
         self._frame_count += 1
         return frame
 
     def stop(self):
         super().stop()
+        if self._dx is not None:
+            try:
+                del self._dx
+            except Exception:
+                pass
+            self._dx = None
         self._executor.shutdown(wait=False)
 
 
@@ -253,6 +324,7 @@ class HostMicAudioTrack(MediaStreamTrack):
     def __init__(self):
         super().__init__()
         self._q = asyncio.Queue(maxsize=12)
+        self._sys_q = asyncio.Queue(maxsize=12)
         self._loop = asyncio.get_running_loop()
         self._pts = 0
         self._start_time = None
@@ -260,6 +332,9 @@ class HostMicAudioTrack(MediaStreamTrack):
         self._stream = None
         self._resampler = None
         self._in_rate = AUDIO_SAMPLE_RATE
+        self._sys_stop = threading.Event()
+        self._sys_thread = None
+
         try:
             dev = sd.query_devices(kind="input")
             native_rate = int(dev.get("default_samplerate", AUDIO_SAMPLE_RATE)) if dev else AUDIO_SAMPLE_RATE
@@ -285,8 +360,74 @@ class HostMicAudioTrack(MediaStreamTrack):
                 print(f"[AUDIO] Mikrofon ({try_rate}Hz) açılamadı: {e}")
                 self._stream = None
 
+        if pyaudio_wp is not None and sys.platform == "win32":
+            self._sys_thread = threading.Thread(target=self._loopback_worker, daemon=True)
+            self._sys_thread.start()
+
+    def _loopback_worker(self):
+        p = None
+        stream = None
+        try:
+            p = pyaudio_wp.PyAudio()
+            wasapi_info = p.get_host_api_info_by_type(pyaudio_wp.paWASAPI)
+            default_spk = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+            loopback_dev = None
+            if not default_spk.get("isLoopbackDevice", False):
+                for lb in p.get_loopback_device_info_generator():
+                    if default_spk["name"] in lb["name"]:
+                        loopback_dev = lb
+                        break
+            else:
+                loopback_dev = default_spk
+
+            if not loopback_dev:
+                return
+
+            rate = int(loopback_dev["defaultSampleRate"])
+            ch = max(1, int(loopback_dev["maxInputChannels"]))
+            chunk = int(round(rate * 0.02))
+            stream = p.open(
+                format=pyaudio_wp.paInt16,
+                channels=ch,
+                rate=rate,
+                frames_per_buffer=chunk,
+                input=True,
+                input_device_index=loopback_dev["index"],
+            )
+            while not self._sys_stop.is_set():
+                data = stream.read(chunk, exception_on_overflow=False)
+                arr = np.frombuffer(data, dtype=np.int16)
+                if ch > 1:
+                    arr = arr.reshape(-1, ch).mean(axis=1).astype(np.int16)
+                if rate != AUDIO_SAMPLE_RATE and len(arr) > 0:
+                    idx = np.linspace(0, len(arr) - 1, AUDIO_BLOCKSIZE).astype(np.int32)
+                    arr = arr[idx]
+                self._loop.call_soon_threadsafe(self._enqueue_sys, arr.reshape(-1, 1))
+        except Exception as e:
+            print(f"[AUDIO] Sistem sesi (WASAPI Loopback) başlatılamadı: {e}")
+        finally:
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            if p:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+    def _enqueue_sys(self, pcm):
+        if self._sys_q.full():
+            try:
+                self._sys_q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self._sys_q.put_nowait(pcm)
+
     def _audio_cb(self, indata, _frames, _time_info, _status):
-        if not session.mic_enabled:
+        if not session.mic_enabled or session.audio_source == "system":
             pcm = np.zeros((len(indata), 1), dtype=np.int16)
         else:
             pcm = indata.copy()
@@ -312,32 +453,59 @@ class HostMicAudioTrack(MediaStreamTrack):
         if delay > 0:
             await asyncio.sleep(delay)
 
-        try:
-            pcm = self._q.get_nowait()
-        except asyncio.QueueEmpty:
-            pcm = np.zeros((AUDIO_BLOCKSIZE, 1), dtype=np.int16)
-            frame = AudioFrame.from_ndarray(pcm.T, format="s16", layout="mono")
-            frame.sample_rate = AUDIO_SAMPLE_RATE
-            frame.pts = self._pts
-            frame.time_base = fractions.Fraction(1, AUDIO_SAMPLE_RATE)
-            self._pts += AUDIO_BLOCKSIZE
-            self._frame_count += 1
-            return frame
+        mic_pcm = None
+        if session.mic_enabled and session.audio_source in ("mic", "both"):
+            try:
+                raw_mic = self._q.get_nowait()
+                if self._resampler is not None:
+                    f = AudioFrame.from_ndarray(raw_mic.T, format="s16", layout="mono")
+                    f.sample_rate = self._in_rate
+                    res = self._resampler.resample(f)
+                    if res:
+                        mic_pcm = res[0].to_ndarray().reshape(-1, 1)
+                else:
+                    mic_pcm = raw_mic
+            except asyncio.QueueEmpty:
+                pass
 
-        frame = AudioFrame.from_ndarray(pcm.T, format="s16", layout="mono")
-        frame.sample_rate = self._in_rate
-        if self._resampler is not None:
-            resampled = self._resampler.resample(frame)
-            if resampled:
-                frame = resampled[0]
+        sys_pcm = None
+        if session.audio_source in ("system", "both"):
+            try:
+                sys_pcm = self._sys_q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+
+        if mic_pcm is not None and sys_pcm is not None:
+            n = min(len(mic_pcm), len(sys_pcm), AUDIO_BLOCKSIZE)
+            mixed = np.clip(
+                mic_pcm[:n].astype(np.int32) + sys_pcm[:n].astype(np.int32),
+                -32768,
+                32767,
+            ).astype(np.int16)
+            if n < AUDIO_BLOCKSIZE:
+                mixed = np.pad(mixed, ((0, AUDIO_BLOCKSIZE - n), (0, 0)))
+        elif mic_pcm is not None:
+            mixed = mic_pcm[:AUDIO_BLOCKSIZE]
+            if len(mixed) < AUDIO_BLOCKSIZE:
+                mixed = np.pad(mixed, ((0, AUDIO_BLOCKSIZE - len(mixed)), (0, 0)))
+        elif sys_pcm is not None:
+            mixed = sys_pcm[:AUDIO_BLOCKSIZE]
+            if len(mixed) < AUDIO_BLOCKSIZE:
+                mixed = np.pad(mixed, ((0, AUDIO_BLOCKSIZE - len(mixed)), (0, 0)))
+        else:
+            mixed = np.zeros((AUDIO_BLOCKSIZE, 1), dtype=np.int16)
+
+        frame = AudioFrame.from_ndarray(mixed.T, format="s16", layout="mono")
+        frame.sample_rate = AUDIO_SAMPLE_RATE
         frame.pts = self._pts
         frame.time_base = fractions.Fraction(1, AUDIO_SAMPLE_RATE)
-        self._pts += frame.samples
+        self._pts += AUDIO_BLOCKSIZE
         self._frame_count += 1
         return frame
 
     def stop(self):
         super().stop()
+        self._sys_stop.set()
         if self._stream:
             try:
                 self._stream.stop()
@@ -448,6 +616,32 @@ def process_control_command(cmd_str, channel=None):
                 set_windows_clipboard(txt)
             except Exception:
                 pass
+            return
+
+        if cmd == "FILE_START":
+            parts = val.split(":", 2)
+            if len(parts) >= 2:
+                fid, fname = parts[0], os.path.basename(parts[1]) or "dosya"
+                dl_dir = os.path.join(os.path.expanduser("~"), "Downloads", "Yansima")
+                os.makedirs(dl_dir, exist_ok=True)
+                fpath = os.path.join(dl_dir, fname)
+                session.incoming_files[fid] = {"path": fpath, "chunks": []}
+            return
+
+        if cmd == "FILE_CHUNK":
+            fid, b64 = val.split(":", 1)
+            entry = session.incoming_files.get(fid)
+            if entry is not None:
+                entry["chunks"].append(base64.b64decode(b64.encode("ascii")))
+            return
+
+        if cmd == "FILE_END":
+            entry = session.incoming_files.pop(val, None)
+            if entry is not None:
+                with open(entry["path"], "wb") as f:
+                    for ch in entry["chunks"]:
+                        f.write(ch)
+                print(f"[FILE] Kaydedildi: {entry['path']}")
             return
 
         if not session.control_enabled:
@@ -820,10 +1014,93 @@ def set_stream_settings(monitor_idx, quality):
         "low": (1280, 15),
         "medium": (1600, 24),
         "high": (1920, 30),
+        "ultra": (1920, 60),
     }
-    max_w, fps = q_map.get(quality, (1920, 25))
+    max_w, fps = q_map.get(quality, (1920, 30))
     session.max_width = max_w
     session.target_fps = fps
+
+
+@eel.expose
+def set_audio_source(src):
+    if src in ("mic", "system", "both"):
+        session.audio_source = src
+
+
+@eel.expose
+def host_send_file():
+    if not session.data_channel or session.data_channel.readyState != "open":
+        return {"ok": False, "error": "Aktif bağlantı yok."}
+
+    def _pick_and_send():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            path = filedialog.askopenfilename(title="Karşı Tarafa Gönderilecek Dosyayı Seçin")
+            root.destroy()
+            if not path:
+                return
+            fname = os.path.basename(path)
+            size = os.path.getsize(path)
+            fid = secrets.token_hex(4)
+            if session.loop and session.data_channel and session.data_channel.readyState == "open":
+                session.loop.call_soon_threadsafe(session.data_channel.send, f"FILE_START:{fid}:{fname}:{size}")
+                with open(path, "rb") as f:
+                    while True:
+                        chunk = f.read(24576)
+                        if not chunk:
+                            break
+                        b64 = base64.b64encode(chunk).decode("ascii")
+                        session.loop.call_soon_threadsafe(session.data_channel.send, f"FILE_CHUNK:{fid}:{b64}")
+                        time.sleep(0.005)
+                session.loop.call_soon_threadsafe(session.data_channel.send, f"FILE_END:{fid}")
+        except Exception as e:
+            print(f"[FILE] Gönderim hatası: {e}")
+
+    threading.Thread(target=_pick_and_send, daemon=True).start()
+    return {"ok": True}
+
+
+@eel.expose
+def get_autostart():
+    if sys.platform != "win32":
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, "Yansima")
+            return True
+    except Exception:
+        return False
+
+
+@eel.expose
+def set_autostart(enabled):
+    if sys.platform != "win32":
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}"'
+                else:
+                    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                    if not os.path.exists(pyw):
+                        pyw = sys.executable
+                    cmd = f'"{pyw}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, "Yansima", 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, "Yansima")
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        print(f"[AUTOSTART] Hata: {e}")
+        return False
 
 
 @eel.expose
@@ -876,12 +1153,65 @@ def stop_session():
         asyncio.run_coroutine_threadsafe(close_peer_connection(rotate=True), session.loop)
 
 
+def open_ui_window():
+    url = "http://localhost:8000/index.html"
+    for browser in (
+        os.path.join(os.environ.get("ProgramFiles", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+    ):
+        if browser and os.path.exists(browser):
+            try:
+                subprocess.Popen([browser, f"--app={url}", "--window-size=960,680"])
+                return
+            except Exception:
+                pass
+    webbrowser.open(url)
+
+
+def start_tray_icon():
+    base_dir = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    ico_path = os.path.join(base_dir, "screen.ico")
+    if os.path.exists(ico_path):
+        icon_img = Image.open(ico_path)
+    else:
+        icon_img = Image.new("RGB", (64, 64), (239, 57, 69))
+
+    def on_open(icon, item):
+        open_ui_window()
+
+    def on_toggle_autostart(icon, item):
+        set_autostart(not get_autostart())
+
+    def on_exit(icon, item):
+        try:
+            icon.stop()
+        except Exception:
+            pass
+        os._exit(0)
+
+    menu = pystray.Menu(
+        pystray.MenuItem("Pencereyi Aç", on_open, default=True),
+        pystray.MenuItem("Windows Başlangıcında Çalıştır", on_toggle_autostart, checked=lambda item: get_autostart()),
+        pystray.MenuItem("Çıkış", on_exit),
+    )
+    tray = pystray.Icon("Yansima", icon_img, "Yansıma - Uzak Masaüstü", menu)
+    tray.run()
+
+
+def on_eel_close(_page, _sockets):
+    # Pencere kapatıldığında uygulama sistem tepsisinde (tray) çalışmaya devam eder
+    pass
+
+
 # --- MAIN ---
 if __name__ == "__main__":
     threading.Thread(target=start_asyncio_loop, daemon=True).start()
     threading.Thread(target=start_mqtt_worker, daemon=True).start()
+    threading.Thread(target=start_tray_icon, daemon=True).start()
 
-    eel.start("index.html", size=(920, 620), block=False)
+    eel.start("index.html", size=(960, 680), port=8000, block=False, close_callback=on_eel_close)
 
     while True:
         try:

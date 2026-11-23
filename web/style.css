@@ -161,6 +161,50 @@ label {
     color: var(--text-muted);
 }
 
+.invite-qr-layout {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.qr-box {
+    width: 96px;
+    height: 96px;
+    background: #fff;
+    padding: 6px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.qr-box img,
+.qr-box canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.autostart-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-muted);
+    cursor: pointer;
+    margin-bottom: 0;
+}
+
+.autostart-check input {
+    width: auto;
+    min-height: auto;
+    flex: 0;
+    accent-color: var(--primary);
+}
+
 .credentials-row {
     display: grid;
     grid-template-columns: 1fr 1fr;

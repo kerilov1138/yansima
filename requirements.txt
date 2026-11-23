@@ -7,3 +7,6 @@ numpy
 aiortc
 av
 paho-mqtt
+pystray
+dxcam
+pyaudiowpatch
