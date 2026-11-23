@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import ctypes
 import fractions
 import hashlib
@@ -180,6 +181,11 @@ class HostSession:
         self.loop = None
         self.mqtt_online = False
         self.mqtt_text = "Hazırlanıyor..."
+        self.control_enabled = True
+        self.monitor_index = 1
+        self.max_width = 1920
+        self.target_fps = 25
+        self.data_channel = None
 
     def rotate_token(self):
         self.current_token = generate_token()
@@ -203,12 +209,17 @@ class ScreenVideoTrack(MediaStreamTrack):
     def _grab_frame(self):
         if self._sct is None:
             self._sct = mss.mss()
-        monitor = self._sct.monitors[1]
+        monitors = self._sct.monitors
+        idx = session.monitor_index
+        if idx < 0 or idx >= len(monitors):
+            idx = 1 if len(monitors) > 1 else 0
+        monitor = monitors[idx]
         raw = self._sct.grab(monitor)
-        if raw.width > 1920:
+        max_w = session.max_width
+        if raw.width > max_w:
             img = Image.frombytes("RGB", raw.size, raw.rgb)
-            new_h = int(raw.height * (1920 / raw.width))
-            img = img.resize((1920, new_h), Image.Resampling.BILINEAR)
+            new_h = int(raw.height * (max_w / raw.width))
+            img = img.resize((max_w, new_h), Image.Resampling.BILINEAR)
             return np.asarray(img)
         arr = np.frombuffer(raw.rgb, dtype=np.uint8).reshape((raw.height, raw.width, 3))
         return np.ascontiguousarray(arr)
@@ -217,8 +228,8 @@ class ScreenVideoTrack(MediaStreamTrack):
         if self._start_time is None:
             self._start_time = time.time()
 
-        # Target ~25 FPS
-        target_t = self._start_time + (self._frame_count / 25.0)
+        fps = max(10, min(30, session.target_fps))
+        target_t = self._start_time + (self._frame_count / float(fps))
         delay = target_t - time.time()
         if delay > 0:
             await asyncio.sleep(delay)
@@ -365,13 +376,92 @@ async def play_remote_audio(track):
                 pass
 
 
-# --- CONTROL COMMAND PROCESSOR ---
-def process_control_command(cmd_str):
+# --- CLIPBOARD HELPERS (WINDOWS) ---
+def get_windows_clipboard():
+    if sys.platform != "win32":
+        return ""
+    CF_UNICODETEXT = 13
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    if not user32.OpenClipboard(None):
+        return ""
     try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return ""
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    except Exception:
+        return ""
+    finally:
+        user32.CloseClipboard()
+
+
+def set_windows_clipboard(text):
+    if sys.platform != "win32":
+        return
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    data = (text + "\0").encode("utf-16-le")
+    if not user32.OpenClipboard(None):
+        return
+    try:
+        user32.EmptyClipboard()
+        h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not h_mem:
+            return
+        ptr = kernel32.GlobalLock(h_mem)
+        if ptr:
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(h_mem)
+            user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+    except Exception:
+        pass
+    finally:
+        user32.CloseClipboard()
+
+
+# --- CONTROL COMMAND PROCESSOR ---
+def process_control_command(cmd_str, channel=None):
+    try:
+        if cmd_str == "CLIP_GET":
+            txt = get_windows_clipboard()
+            if channel and channel.readyState == "open":
+                b64 = base64.b64encode(txt.encode("utf-8")).decode("ascii")
+                channel.send(f"CLIP_DATA:{b64}")
+            return
+
         if ":" not in cmd_str:
             return
         cmd, val = cmd_str.split(":", 1)
+
+        if cmd == "CLIP_SET":
+            try:
+                txt = base64.b64decode(val.encode("ascii")).decode("utf-8")
+                set_windows_clipboard(txt)
+            except Exception:
+                pass
+            return
+
+        if not session.control_enabled:
+            return
+
         screen_w, screen_h = pyautogui.size()
+
+        if cmd == "COMBO":
+            keys = [k.strip() for k in val.split("+") if k.strip()]
+            if len(keys) == 1:
+                pyautogui.press(keys[0])
+            elif len(keys) > 1:
+                pyautogui.hotkey(*keys)
+            return
 
         if cmd == "MOVE":
             x, y = map(float, val.split(","))
@@ -442,6 +532,15 @@ async def handle_offer(client_id, sdp, sdp_type):
 
     @pc.on("datachannel")
     def on_datachannel(channel):
+        session.data_channel = channel
+
+        @channel.on("open")
+        def on_open():
+            try:
+                channel.send(f"MODE:{'control' if session.control_enabled else 'readonly'}")
+            except Exception:
+                pass
+
         async def _cursor_sync():
             last_pos = None
             while session.pc is pc and session.session_active:
@@ -461,7 +560,7 @@ async def handle_offer(client_id, sdp, sdp_type):
         @channel.on("message")
         def on_message(message):
             if isinstance(message, str):
-                process_control_command(message)
+                process_control_command(message, channel=channel)
 
         @channel.on("close")
         def on_close():
@@ -558,6 +657,8 @@ async def close_peer_connection(rotate=True):
 
     session.active_client_id = None
     session.pending_client = None
+    session.data_channel = None
+    session.control_enabled = True
     session.mic_enabled = True
     session.spk_enabled = True
 
@@ -695,12 +796,54 @@ def regenerate_invite():
 
 
 @eel.expose
-def respond_to_request(allow):
+def get_monitors():
+    try:
+        with mss.mss() as sct:
+            res = []
+            for idx, m in enumerate(sct.monitors):
+                if idx == 0:
+                    res.append({"index": 0, "label": f"Tüm Ekranlar ({m['width']}x{m['height']})"})
+                else:
+                    res.append({"index": idx, "label": f"Ekran {idx} ({m['width']}x{m['height']})"})
+            return res
+    except Exception:
+        return [{"index": 1, "label": "Ana Ekran"}]
+
+
+@eel.expose
+def set_stream_settings(monitor_idx, quality):
+    try:
+        session.monitor_index = int(monitor_idx)
+    except Exception:
+        pass
+    q_map = {
+        "low": (1280, 15),
+        "medium": (1600, 24),
+        "high": (1920, 30),
+    }
+    max_w, fps = q_map.get(quality, (1920, 25))
+    session.max_width = max_w
+    session.target_fps = fps
+
+
+@eel.expose
+def set_control_mode(enabled):
+    session.control_enabled = bool(enabled)
+    if not session.control_enabled:
+        release_all_keys()
+    if session.data_channel and session.data_channel.readyState == "open" and session.loop:
+        mode_msg = f"MODE:{'control' if session.control_enabled else 'readonly'}"
+        session.loop.call_soon_threadsafe(session.data_channel.send, mode_msg)
+
+
+@eel.expose
+def respond_to_request(allow, control_allowed=True):
     pending = session.pending_client
     if not pending:
         return
     cid = pending["clientId"]
     if allow:
+        session.control_enabled = bool(control_allowed)
         publish_to_client(cid, {"type": "accepted"})
 
         def _expire_if_no_offer():

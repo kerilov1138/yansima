@@ -168,22 +168,29 @@ label {
     margin-bottom: 14px;
 }
 
-input {
+input,
+select {
     width: 100%;
     flex: 1;
     background-color: var(--input-bg);
     border: 1px solid #44444e;
     padding: 10px 12px;
     color: white;
-    font-size: 15px;
-    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 14px;
+    font-family: inherit;
     border-radius: 6px;
     outline: none;
-    letter-spacing: 0.5px;
     transition: border-color 0.2s;
 }
 
-input:focus {
+input {
+    font-size: 15px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    letter-spacing: 0.5px;
+}
+
+input:focus,
+select:focus {
     border-color: var(--primary);
 }
 
@@ -357,6 +364,40 @@ button:disabled {
 
 .toolbar button.active-toggle {
     background-color: var(--primary);
+}
+
+.shortcut-drawer {
+    background-color: #1a1a1f;
+    border-bottom: 1px solid var(--border);
+    padding: 6px 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.shortcut-drawer::-webkit-scrollbar {
+    display: none;
+}
+
+.shortcut-drawer button {
+    flex-shrink: 0;
+    background-color: #32323c;
+    color: #fff;
+    padding: 6px 10px;
+    font-size: 12px;
+    border-radius: 6px;
+    white-space: nowrap;
+}
+
+.shortcut-drawer button.clip-btn {
+    background-color: #264f73;
+}
+
+#remote-view.fullscreen-active .shortcut-drawer {
+    display: none;
 }
 
 .video-wrapper {

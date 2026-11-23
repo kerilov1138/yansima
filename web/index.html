@@ -69,6 +69,23 @@
                         <input type="text" id="my-token" readonly value="...">
                     </div>
                 </div>
+
+                <div class="credentials-row" style="margin-bottom: 0;">
+                    <div>
+                        <label>Paylaşılacak Ekran</label>
+                        <select id="host-monitor" onchange="applyHostStreamSettings()">
+                            <option value="1">Ana Ekran</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Görüntü Kalitesi / FPS</label>
+                        <select id="host-quality" onchange="applyHostStreamSettings()">
+                            <option value="high" selected>Yüksek (1080p / 30 FPS)</option>
+                            <option value="medium">Dengeli (1600p / 24 FPS)</option>
+                            <option value="low">Tasarruf (720p / 15 FPS)</option>
+                        </select>
+                    </div>
+                </div>
             </div>
 
             <!-- Client Connect Card (Visible on Both Desktop App and Mobile/Browser) -->
@@ -105,10 +122,26 @@
                 <button id="btn-rclick" class="mobile-only-btn" onclick="toggleRightClickMode()">Sağ Tık: Kapalı</button>
                 <button id="btn-zoom" onclick="toggleZoomReset()">Yakınlaştır: 1x</button>
                 <button id="btn-rotate" class="mobile-only-btn" onclick="toggleOrientation()">Yatay</button>
+                <button id="btn-shortcuts" onclick="toggleShortcutsDrawer()">Kısayollar</button>
                 <button id="btn-kb" onclick="toggleMobileKeyboard()">Klavye</button>
                 <button onclick="toggleFullscreen()">Tam Ekran</button>
                 <button onclick="disconnect()" class="btn-danger">Bağlantıyı Kes</button>
             </div>
+        </div>
+        <div id="shortcut-drawer" class="shortcut-drawer hidden">
+            <button onclick="sendCombo('ctrl+c')">Ctrl+C</button>
+            <button onclick="sendCombo('ctrl+v')">Ctrl+V</button>
+            <button onclick="sendCombo('ctrl+x')">Ctrl+X</button>
+            <button onclick="sendCombo('ctrl+z')">Ctrl+Z</button>
+            <button onclick="sendCombo('ctrl+a')">Ctrl+A</button>
+            <button onclick="sendCombo('alt+tab')">Alt+Tab</button>
+            <button onclick="sendCombo('win')">Win</button>
+            <button onclick="sendCombo('esc')">Esc</button>
+            <button onclick="sendCombo('delete')">Del</button>
+            <button onclick="sendCombo('enter')">Enter</button>
+            <button onclick="sendCombo('tab')">Tab</button>
+            <button class="clip-btn" onclick="sendClipboardToHost()">Panoyu Gönder</button>
+            <button class="clip-btn" onclick="requestClipboardFromHost()">Panoyu Al</button>
         </div>
         <div class="video-wrapper" id="video-wrapper">
             <video id="remote-video" autoplay playsinline muted></video>
@@ -128,9 +161,10 @@
         <div class="modal-content">
             <h3>Bağlantı İsteği</h3>
             <p><strong id="requester-info">Uzak Cihaz</strong> ekranınıza bağlanmak istiyor.</p>
-            <div class="modal-actions">
-                <button onclick="respondConnection(true)" class="btn-accept">Kabul Et</button>
-                <button onclick="respondConnection(false)" class="btn-deny">Reddet</button>
+            <div class="modal-actions" style="flex-direction: column; gap: 8px;">
+                <button onclick="respondConnection(true, true)" class="btn-accept">Kabul Et (Tam Kontrol)</button>
+                <button onclick="respondConnection(true, false)" class="secondary-btn" style="padding: 10px 16px;">Kabul Et (Sadece İzle)</button>
+                <button onclick="respondConnection(false, false)" class="btn-deny">Reddet</button>
             </div>
         </div>
     </div>
@@ -157,6 +191,17 @@
             <div class="host-active-controls">
                 <button id="btn-mic-host" onclick="toggleHostMic()">Mikrofon: Açık</button>
                 <button id="btn-spk-host" onclick="toggleHostSpk()">Hoparlör: Açık</button>
+                <button id="btn-ctrl-host" class="active-toggle" onclick="toggleHostControl()">Kontrol: Açık</button>
+            </div>
+            <div style="padding: 0 20px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <select id="live-monitor" onchange="applyLiveStreamSettings()">
+                    <option value="1">Ana Ekran</option>
+                </select>
+                <select id="live-quality" onchange="applyLiveStreamSettings()">
+                    <option value="high" selected>Yüksek (30 FPS)</option>
+                    <option value="medium">Dengeli (24 FPS)</option>
+                    <option value="low">Tasarruf (15 FPS)</option>
+                </select>
             </div>
             <div class="host-active-footer">
                 <button onclick="stopHostSession()" class="btn-danger" style="width: 100%; padding: 12px;">Oturumu Sonlandır</button>

@@ -39,6 +39,8 @@ let cursorNy = 0.5;
 let lastLocalCursorTs = 0;
 let hostMicState = true;
 let hostSpkState = true;
+let hostCtrlState = true;
+let clientReadOnly = false;
 
 // --- INITIALIZATION ---
 window.addEventListener("DOMContentLoaded", async () => {
@@ -56,6 +58,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             if (typeof info.mqtt_online === "boolean" && info.mqtt_text) {
                 setStatus(info.mqtt_online, info.mqtt_text);
             }
+            const monitors = await eel.get_monitors()();
+            populateMonitorSelects(monitors);
         } catch (e) {
             console.error("Eel init hatası:", e);
         }
@@ -146,17 +150,64 @@ function copyText(elementId, btn) {
     setTimeout(() => { btn.innerHTML = orig; }, 1600);
 }
 
+function populateMonitorSelects(monitors) {
+    if (!Array.isArray(monitors) || !monitors.length) return;
+    ["host-monitor", "live-monitor"].forEach(id => {
+        const sel = document.getElementById(id);
+        if (!sel) return;
+        sel.innerHTML = "";
+        monitors.forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m.index;
+            opt.textContent = m.label;
+            sel.appendChild(opt);
+        });
+    });
+}
+
+function applyHostStreamSettings() {
+    if (!isDesktopApp) return;
+    const mon = document.getElementById("host-monitor")?.value || 1;
+    const qual = document.getElementById("host-quality")?.value || "high";
+    const liveMon = document.getElementById("live-monitor");
+    const liveQual = document.getElementById("live-quality");
+    if (liveMon) liveMon.value = mon;
+    if (liveQual) liveQual.value = qual;
+    eel.set_stream_settings(mon, qual);
+}
+
+function applyLiveStreamSettings() {
+    if (!isDesktopApp) return;
+    const mon = document.getElementById("live-monitor")?.value || 1;
+    const qual = document.getElementById("live-quality")?.value || "high";
+    const hostMon = document.getElementById("host-monitor");
+    const hostQual = document.getElementById("host-quality");
+    if (hostMon) hostMon.value = mon;
+    if (hostQual) hostQual.value = qual;
+    eel.set_stream_settings(mon, qual);
+}
+
 // --- HOST UI HANDLERS ---
 function show_connection_request(info) {
     document.getElementById("requester-info").innerText = info || "Uzak Cihaz";
     document.getElementById("connection-modal").classList.remove("hidden");
 }
 
-function respondConnection(allow) {
+function respondConnection(allow, controlAllowed = true) {
     document.getElementById("connection-modal").classList.add("hidden");
-    if (isDesktopApp) {
-        eel.respond_to_request(allow);
+    if (allow) {
+        hostCtrlState = Boolean(controlAllowed);
+        updateBtn("btn-ctrl-host", hostCtrlState, "Kontrol");
     }
+    if (isDesktopApp) {
+        eel.respond_to_request(allow, controlAllowed);
+    }
+}
+
+function toggleHostControl() {
+    hostCtrlState = !hostCtrlState;
+    updateBtn("btn-ctrl-host", hostCtrlState, "Kontrol");
+    if (isDesktopApp) eel.set_control_mode(hostCtrlState);
 }
 
 function showHostView() {
@@ -170,8 +221,10 @@ function on_host_session_ended() {
     document.getElementById("dashboard").classList.remove("hidden");
     hostMicState = true;
     hostSpkState = true;
+    hostCtrlState = true;
     updateBtn("btn-mic-host", true, "Mikrofon");
     updateBtn("btn-spk-host", true, "Hoparlör");
+    updateBtn("btn-ctrl-host", true, "Kontrol");
 }
 
 function toggleHostMic() {
@@ -262,7 +315,7 @@ function startMqttSignaling(room, token, brokerIdx) {
         if (msg.type === "rejected") {
             cleanupClient(msg.reason || "Bağlantı reddedildi veya tek seferlik şifre geçersiz.");
         } else if (msg.type === "accepted") {
-            document.getElementById("waiting-text").innerText = "P2P WebRTC bağlantısı kuruluyor...";
+            document.getElementById("waiting-text").innerText = "Bağlantı Kuruluyor...";
             await initWebRTCClient(toHostTopic, token);
         } else if (msg.type === "answer" && pc) {
             await pc.setRemoteDescription(new RTCSessionDescription({
@@ -339,12 +392,32 @@ async function initWebRTCClient(toHostTopic, token) {
     // DataChannel for mouse, touch, keyboard & cursor sync
     dc = pc.createDataChannel("control", { ordered: true });
     dc.onopen = () => console.log("Kontrol kanalı açıldı.");
-    dc.onmessage = (event) => {
-        if (typeof event.data === "string" && event.data.startsWith("CURSOR:")) {
+    dc.onmessage = async (event) => {
+        if (typeof event.data !== "string") return;
+        if (event.data.startsWith("CURSOR:")) {
             if (Date.now() - lastLocalCursorTs < 350) return;
             const [nx, ny] = event.data.slice(7).split(",").map(Number);
             if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
                 updateRemoteCursor(nx, ny);
+            }
+        } else if (event.data.startsWith("MODE:")) {
+            clientReadOnly = event.data.slice(5) === "readonly";
+            const badge = document.querySelector(".conn-badge");
+            if (badge) {
+                badge.innerText = clientReadOnly ? "Salt Okunur" : "Canlı";
+                badge.style.color = clientReadOnly ? "#f0ad4e" : "#4caf50";
+            }
+        } else if (event.data.startsWith("CLIP_DATA:")) {
+            try {
+                const b64 = event.data.slice(10);
+                const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                const text = new TextDecoder().decode(bytes);
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                }
+                alert("PC panosu kopyalandı.");
+            } catch {
+                alert("Pano okunamadı.");
             }
         }
     };
@@ -450,6 +523,14 @@ function cleanupClient(alertMsg) {
     document.getElementById("dashboard").classList.remove("hidden");
     document.getElementById("connect-btn").disabled = false;
 
+    document.getElementById("shortcut-drawer")?.classList.add("hidden");
+    document.getElementById("btn-shortcuts")?.classList.remove("active-toggle");
+    clientReadOnly = false;
+    const badge = document.querySelector(".conn-badge");
+    if (badge) {
+        badge.innerText = "Canlı";
+        badge.style.color = "#4caf50";
+    }
     micEnabled = false;
     spkEnabled = true;
     rightClickMode = false;
@@ -505,7 +586,15 @@ async function toggleMic() {
             }
         } catch (err) {
             console.warn("Mikrofon izni alınamadı:", err);
-            micEnabled = false;
+            document.getElementById("shortcut-drawer")?.classList.add("hidden");
+    document.getElementById("btn-shortcuts")?.classList.remove("active-toggle");
+    clientReadOnly = false;
+    const badge = document.querySelector(".conn-badge");
+    if (badge) {
+        badge.innerText = "Canlı";
+        badge.style.color = "#4caf50";
+    }
+    micEnabled = false;
             updateBtn("btn-mic", false, "Mikrofon");
             alert("Mikrofon izni verilmedi veya mikrofon bulunamadı.");
             return;
@@ -544,6 +633,51 @@ function toggleTouchMode() {
         btn.innerText = trackpadMode ? "Fare: Trackpad" : "Fare: Dokunmatik";
         btn.classList.toggle("active-toggle", trackpadMode);
     }
+}
+
+function toggleShortcutsDrawer() {
+    const drawer = document.getElementById("shortcut-drawer");
+    const btn = document.getElementById("btn-shortcuts");
+    if (!drawer) return;
+    const willOpen = drawer.classList.contains("hidden");
+    drawer.classList.toggle("hidden", !willOpen);
+    if (btn) btn.classList.toggle("active-toggle", willOpen);
+}
+
+function sendCombo(combo) {
+    if (clientReadOnly) {
+        alert("Salt okunur moddasınız.");
+        return;
+    }
+    sendControl(`COMBO:${combo}`);
+}
+
+async function sendClipboardToHost() {
+    try {
+        let text = "";
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            text = await navigator.clipboard.readText();
+        }
+        if (!text) {
+            text = prompt("PC'ye gönderilecek metni yapıştırın:") || "";
+        }
+        if (!text) return;
+        const bytes = new TextEncoder().encode(text);
+        let bin = "";
+        bytes.forEach(b => { bin += String.fromCharCode(b); });
+        sendControl(`CLIP_SET:${btoa(bin)}`);
+    } catch {
+        const text = prompt("PC'ye gönderilecek metni yapıştırın:") || "";
+        if (!text) return;
+        const bytes = new TextEncoder().encode(text);
+        let bin = "";
+        bytes.forEach(b => { bin += String.fromCharCode(b); });
+        sendControl(`CLIP_SET:${btoa(bin)}`);
+    }
+}
+
+function requestClipboardFromHost() {
+    sendControl("CLIP_GET");
 }
 
 function toggleMobileKeyboard() {
