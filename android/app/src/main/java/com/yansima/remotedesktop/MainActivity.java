@@ -4,11 +4,15 @@ import android.Manifest;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -38,6 +42,25 @@ public class MainActivity extends BridgeActivity {
                             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
                         } else {
                             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                        }
+                    });
+                }
+
+                @JavascriptInterface
+                public void setFullscreen(final boolean enabled) {
+                    runOnUiThread(() -> {
+                        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(
+                            getWindow(),
+                            getWindow().getDecorView()
+                        );
+                        if (controller == null) return;
+                        if (enabled) {
+                            controller.setSystemBarsBehavior(
+                                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                            );
+                            controller.hide(WindowInsetsCompat.Type.systemBars());
+                        } else {
+                            controller.show(WindowInsetsCompat.Type.systemBars());
                         }
                     });
                 }

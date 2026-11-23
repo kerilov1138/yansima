@@ -27,6 +27,7 @@ from aiortc import (
     RTCSessionDescription,
 )
 from av import AudioFrame, AudioResampler, VideoFrame
+from PIL import Image
 
 # --- PYTHONW / NO-CONSOLE SAFE STREAMS ---
 if sys.stdout is None:
@@ -204,10 +205,12 @@ class ScreenVideoTrack(MediaStreamTrack):
             self._sct = mss.mss()
         monitor = self._sct.monitors[1]
         raw = self._sct.grab(monitor)
+        if raw.width > 1920:
+            img = Image.frombytes("RGB", raw.size, raw.rgb)
+            new_h = int(raw.height * (1920 / raw.width))
+            img = img.resize((1920, new_h), Image.Resampling.BILINEAR)
+            return np.asarray(img)
         arr = np.frombuffer(raw.rgb, dtype=np.uint8).reshape((raw.height, raw.width, 3))
-        # Downscale high-res monitors (>1600px wide) by 2x for smooth WebRTC bitrate on mobile
-        if raw.width > 1600:
-            arr = arr[::2, ::2, :]
         return np.ascontiguousarray(arr)
 
     async def recv(self):
@@ -238,25 +241,42 @@ class HostMicAudioTrack(MediaStreamTrack):
 
     def __init__(self):
         super().__init__()
-        self._q = asyncio.Queue(maxsize=25)
+        self._q = asyncio.Queue(maxsize=12)
         self._loop = asyncio.get_running_loop()
         self._pts = 0
+        self._start_time = None
+        self._frame_count = 0
         self._stream = None
+        self._resampler = None
+        self._in_rate = AUDIO_SAMPLE_RATE
         try:
-            self._stream = sd.InputStream(
-                samplerate=AUDIO_SAMPLE_RATE,
-                channels=AUDIO_CHANNELS,
-                dtype="int16",
-                blocksize=AUDIO_BLOCKSIZE,
-                callback=self._audio_cb,
-            )
-            self._stream.start()
-        except Exception as e:
-            print(f"[AUDIO] Mikrofon açılamadı: {e}")
+            dev = sd.query_devices(kind="input")
+            native_rate = int(dev.get("default_samplerate", AUDIO_SAMPLE_RATE)) if dev else AUDIO_SAMPLE_RATE
+        except Exception:
+            native_rate = AUDIO_SAMPLE_RATE
+
+        for try_rate in (AUDIO_SAMPLE_RATE, native_rate):
+            try:
+                block = int(round(try_rate * 0.02))
+                self._stream = sd.InputStream(
+                    samplerate=try_rate,
+                    channels=AUDIO_CHANNELS,
+                    dtype="int16",
+                    blocksize=block,
+                    callback=self._audio_cb,
+                )
+                self._in_rate = try_rate
+                if try_rate != AUDIO_SAMPLE_RATE:
+                    self._resampler = AudioResampler(format="s16", layout="mono", rate=AUDIO_SAMPLE_RATE)
+                self._stream.start()
+                break
+            except Exception as e:
+                print(f"[AUDIO] Mikrofon ({try_rate}Hz) açılamadı: {e}")
+                self._stream = None
 
     def _audio_cb(self, indata, _frames, _time_info, _status):
         if not session.mic_enabled:
-            pcm = np.zeros((AUDIO_BLOCKSIZE, 1), dtype=np.int16)
+            pcm = np.zeros((len(indata), 1), dtype=np.int16)
         else:
             pcm = indata.copy()
         try:
@@ -273,16 +293,36 @@ class HostMicAudioTrack(MediaStreamTrack):
         self._q.put_nowait(pcm)
 
     async def recv(self):
+        if self._start_time is None:
+            self._start_time = time.time()
+
+        target_t = self._start_time + (self._frame_count * 0.020)
+        delay = target_t - time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
         try:
-            pcm = await asyncio.wait_for(self._q.get(), timeout=0.1)
-        except asyncio.TimeoutError:
+            pcm = self._q.get_nowait()
+        except asyncio.QueueEmpty:
             pcm = np.zeros((AUDIO_BLOCKSIZE, 1), dtype=np.int16)
+            frame = AudioFrame.from_ndarray(pcm.T, format="s16", layout="mono")
+            frame.sample_rate = AUDIO_SAMPLE_RATE
+            frame.pts = self._pts
+            frame.time_base = fractions.Fraction(1, AUDIO_SAMPLE_RATE)
+            self._pts += AUDIO_BLOCKSIZE
+            self._frame_count += 1
+            return frame
 
         frame = AudioFrame.from_ndarray(pcm.T, format="s16", layout="mono")
-        frame.sample_rate = AUDIO_SAMPLE_RATE
+        frame.sample_rate = self._in_rate
+        if self._resampler is not None:
+            resampled = self._resampler.resample(frame)
+            if resampled:
+                frame = resampled[0]
         frame.pts = self._pts
         frame.time_base = fractions.Fraction(1, AUDIO_SAMPLE_RATE)
-        self._pts += AUDIO_BLOCKSIZE
+        self._pts += frame.samples
+        self._frame_count += 1
         return frame
 
     def stop(self):
@@ -335,7 +375,11 @@ def process_control_command(cmd_str):
 
         if cmd == "MOVE":
             x, y = map(float, val.split(","))
-            pyautogui.moveTo(int(x * screen_w), int(y * screen_h))
+            tx, ty = int(x * screen_w), int(y * screen_h)
+            if sys.platform == "win32":
+                ctypes.windll.user32.SetCursorPos(tx, ty)
+            else:
+                pyautogui.moveTo(tx, ty)
         elif cmd == "MDOWN":
             btn, sx, sy = val.split(",")
             pyautogui.mouseDown(x=int(float(sx) * screen_w), y=int(float(sy) * screen_h), button=btn)

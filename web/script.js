@@ -1,4 +1,5 @@
 const isDesktopApp = (typeof eel !== "undefined" && !window.__NO_EEL__);
+const isAndroidApp = Boolean(window.AndroidBridge) || Boolean(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
 
 const MQTT_BROKERS = [
     "wss://broker.emqx.io:8084/mqtt",
@@ -26,14 +27,16 @@ let clientId = "c_" + Math.random().toString(36).slice(2, 10);
 let micEnabled = false;
 let spkEnabled = true;
 let rightClickMode = false;
-let trackpadMode = false;
+let trackpadMode = isAndroidApp;
 let kbOpen = false;
 let isLandscapeLocked = false;
+let isFullscreenMode = false;
 let zoomScale = 1;
 let panX = 0;
 let panY = 0;
 let cursorNx = 0.5;
 let cursorNy = 0.5;
+let lastLocalCursorTs = 0;
 let hostMicState = true;
 let hostSpkState = true;
 
@@ -58,8 +61,13 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
     } else {
         hostCard.classList.add("hidden");
-        modeBadge.innerText = "Tarayıcı / Mobil İstemci";
+        modeBadge.innerText = isAndroidApp ? "Android Uygulaması" : "Tarayıcı / Mobil İstemci";
         setStatus(true, "Bağlanmaya Hazır");
+    }
+
+    if (isAndroidApp) {
+        const tmBtn = document.getElementById("btn-touchmode");
+        if (tmBtn) tmBtn.classList.add("hidden");
     }
 
     // Parse ?room=...&token=... from invite URL
@@ -333,6 +341,7 @@ async function initWebRTCClient(toHostTopic, token) {
     dc.onopen = () => console.log("Kontrol kanalı açıldı.");
     dc.onmessage = (event) => {
         if (typeof event.data === "string" && event.data.startsWith("CURSOR:")) {
+            if (Date.now() - lastLocalCursorTs < 350) return;
             const [nx, ny] = event.data.slice(7).split(",").map(Number);
             if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
                 updateRemoteCursor(nx, ny);
@@ -372,15 +381,24 @@ async function initWebRTCClient(toHostTopic, token) {
     }
 
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    const boostedSdp = boostVideoBitrate(offer.sdp);
+    await pc.setLocalDescription({ type: offer.type, sdp: boostedSdp });
 
     mqttClient.publish(toHostTopic, JSON.stringify({
         type: "offer",
         clientId,
         token,
-        sdp: offer.sdp,
+        sdp: boostedSdp,
         sdpType: offer.type
     }));
+}
+
+function boostVideoBitrate(sdp) {
+    if (!sdp) return sdp;
+    return sdp.replace(/a=fmtp:(\d+) (.+)/g, (match, pt, params) => {
+        if (params.includes("x-google-max-bitrate")) return match;
+        return `a=fmtp:${pt} ${params};x-google-min-bitrate=1500;x-google-start-bitrate=3000;x-google-max-bitrate=6000`;
+    });
 }
 
 function sendByeSignal() {
@@ -435,9 +453,15 @@ function cleanupClient(alertMsg) {
     micEnabled = false;
     spkEnabled = true;
     rightClickMode = false;
-    trackpadMode = false;
+    trackpadMode = isAndroidApp;
     kbOpen = false;
     isLandscapeLocked = false;
+    isFullscreenMode = false;
+    document.getElementById("remote-view")?.classList.remove("fullscreen-active");
+    document.getElementById("btn-exit-fs")?.classList.add("hidden");
+    if (window.AndroidBridge && window.AndroidBridge.setFullscreen) {
+        window.AndroidBridge.setFullscreen(false);
+    }
     resetZoom();
     updateBtn("btn-mic", false, "Mikrofon");
     updateBtn("btn-spk", true, "Hoparlör");
@@ -604,11 +628,22 @@ async function toggleOrientation() {
 
 function toggleFullscreen() {
     const el = document.getElementById("remote-view");
-    if (!document.fullscreenElement) {
-        el.requestFullscreen?.().catch(() => {});
+    const exitBtn = document.getElementById("btn-exit-fs");
+    isFullscreenMode = !isFullscreenMode;
+
+    if (el) el.classList.toggle("fullscreen-active", isFullscreenMode);
+    if (exitBtn) exitBtn.classList.toggle("hidden", !isFullscreenMode);
+
+    if (window.AndroidBridge && window.AndroidBridge.setFullscreen) {
+        window.AndroidBridge.setFullscreen(isFullscreenMode);
     } else {
-        document.exitFullscreen?.().catch(() => {});
+        if (isFullscreenMode && !document.fullscreenElement) {
+            el?.requestFullscreen?.().catch(() => {});
+        } else if (!isFullscreenMode && document.fullscreenElement) {
+            document.exitFullscreen?.().catch(() => {});
+        }
     }
+    setTimeout(() => applyVideoTransform(), 200);
 }
 
 function updateBtn(id, state, label) {
@@ -779,6 +814,23 @@ remoteVideo.addEventListener("touchstart", (e) => {
     }
 }, { passive: false });
 
+let touchMoveRafPending = false;
+let pendingMoveCmd = null;
+
+function queueMoveControl(nx, ny) {
+    lastLocalCursorTs = Date.now();
+    pendingMoveCmd = `MOVE:${nx.toFixed(4)},${ny.toFixed(4)}`;
+    if (touchMoveRafPending) return;
+    touchMoveRafPending = true;
+    requestAnimationFrame(() => {
+        if (pendingMoveCmd) {
+            sendControl(pendingMoveCmd);
+            pendingMoveCmd = null;
+        }
+        touchMoveRafPending = false;
+    });
+}
+
 remoteVideo.addEventListener("touchmove", (e) => {
     e.preventDefault();
     if (e.touches.length === 2 && twoFingerState) {
@@ -827,13 +879,15 @@ remoteVideo.addEventListener("touchmove", (e) => {
                 const nextX = Math.max(0, Math.min(1, cursorNx + (dx * sensitivity) / rect.width));
                 const nextY = Math.max(0, Math.min(1, cursorNy + (dy * sensitivity) / rect.height));
                 updateRemoteCursor(nextX, nextY);
-                sendControl(`MOVE:${nextX.toFixed(4)},${nextY.toFixed(4)}`);
+                queueMoveControl(nextX, nextY);
             }
         } else {
             const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
             if (coords) {
-                updateRemoteCursor(Number(coords.x), Number(coords.y));
-                sendControl(`MOVE:${coords.x},${coords.y}`);
+                const nx = Number(coords.x);
+                const ny = Number(coords.y);
+                updateRemoteCursor(nx, ny);
+                queueMoveControl(nx, ny);
             }
         }
     }
