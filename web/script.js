@@ -460,28 +460,47 @@ async function initWebRTCClient(toHostTopic, token) {
     const remoteAudio = document.getElementById("remote-audio");
     const loadingOverlay = document.getElementById("video-loading-overlay");
 
-    remoteVideo.onloadeddata = () => {
-        if (loadingOverlay) loadingOverlay.classList.add("hidden");
+    const hideLoading = () => {
+        if (remoteVideo.videoWidth > 0 && loadingOverlay) {
+            loadingOverlay.classList.add("hidden");
+        }
     };
-    remoteVideo.onplaying = () => {
-        if (loadingOverlay) loadingOverlay.classList.add("hidden");
-    };
+    remoteVideo.onloadedmetadata = hideLoading;
+    remoteVideo.onloadeddata = hideLoading;
+    remoteVideo.oncanplay = hideLoading;
+    remoteVideo.onplaying = hideLoading;
+    remoteVideo.onresize = hideLoading;
 
     pc.ontrack = (event) => {
-        const stream = event.streams[0] || new MediaStream([event.track]);
         if (event.track.kind === "video") {
             document.getElementById("waiting-modal").classList.add("hidden");
             document.getElementById("dashboard").classList.add("hidden");
             document.getElementById("remote-view").classList.remove("hidden");
-            if (loadingOverlay) loadingOverlay.classList.remove("hidden");
+            if (loadingOverlay) {
+                loadingOverlay.innerText = "Görüntü yükleniyor...";
+                loadingOverlay.classList.remove("hidden");
+            }
 
-            remoteVideo.srcObject = stream;
+            remoteVideo.srcObject = new MediaStream([event.track]);
             remoteVideo.muted = true;
             remoteVideo.play().catch(() => {});
         } else if (event.track.kind === "audio") {
-            remoteAudio.srcObject = stream;
+            remoteAudio.srcObject = new MediaStream([event.track]);
             remoteAudio.muted = !spkEnabled;
             remoteAudio.play().catch(() => {});
+        }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+        if (!pc) return;
+        const iceState = pc.iceConnectionState;
+        if (iceState === "connected" || iceState === "completed") {
+            if (remoteVideo.paused && remoteVideo.srcObject) {
+                remoteVideo.play().catch(() => {});
+            }
+            hideLoading();
+        } else if (iceState === "failed") {
+            cleanupClient("P2P video bağlantısı kurulamadı (Ağ/NAT engeli).");
         }
     };
 

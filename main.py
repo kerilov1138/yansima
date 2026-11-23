@@ -201,8 +201,8 @@ class HostSession:
         self.mqtt_text = "Hazırlanıyor..."
         self.control_enabled = True
         self.monitor_index = 1
-        self.max_width = 1920
-        self.target_fps = 30
+        self.max_width = 1600
+        self.target_fps = 24
         self.audio_source = "both"  # "mic", "system", "both"
         self.privacy_enabled = False
         self.data_channel = None
@@ -260,6 +260,8 @@ class ScreenVideoTrack(MediaStreamTrack):
     def _grab_frame(self):
         idx = session.monitor_index
         max_w = session.max_width
+        if self._frame_count < 30 and max_w > 1280:
+            max_w = 1280
 
         dx = self._ensure_dxcam(idx)
         if dx is not None:
