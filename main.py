@@ -28,6 +28,12 @@ from aiortc import (
 )
 from av import AudioFrame, AudioResampler, VideoFrame
 
+# --- PYTHONW / NO-CONSOLE SAFE STREAMS ---
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 # --- DPI AWARENESS & PYAUTOGUI ---
 def set_dpi_awareness():
     if sys.platform == "win32":
@@ -377,6 +383,8 @@ async def handle_offer(client_id, sdp, sdp_type):
     session.pc = pc
     session.active_client_id = client_id
     session.session_active = True
+    session.mic_enabled = True
+    session.spk_enabled = True
 
     video_track = ScreenVideoTrack()
     audio_track = HostMicAudioTrack()
@@ -390,6 +398,22 @@ async def handle_offer(client_id, sdp, sdp_type):
 
     @pc.on("datachannel")
     def on_datachannel(channel):
+        async def _cursor_sync():
+            last_pos = None
+            while session.pc is pc and session.session_active:
+                try:
+                    if channel.readyState == "open":
+                        px, py = pyautogui.position()
+                        sw, sh = pyautogui.size()
+                        if sw > 0 and sh > 0 and (px, py) != last_pos:
+                            last_pos = (px, py)
+                            channel.send(f"CURSOR:{px / sw:.4f},{py / sh:.4f}")
+                except Exception:
+                    pass
+                await asyncio.sleep(0.06)
+
+        asyncio.create_task(_cursor_sync())
+
         @channel.on("message")
         def on_message(message):
             if isinstance(message, str):
@@ -490,6 +514,8 @@ async def close_peer_connection(rotate=True):
 
     session.active_client_id = None
     session.pending_client = None
+    session.mic_enabled = True
+    session.spk_enabled = True
 
     if rotate and was_active:
         session.rotate_token()

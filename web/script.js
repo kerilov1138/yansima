@@ -19,6 +19,7 @@ let currentToken = "";
 let mqttClient = null;
 let pc = null;
 let dc = null;
+let audioSender = null;
 let localMicStream = null;
 let clientId = "c_" + Math.random().toString(36).slice(2, 10);
 
@@ -319,9 +320,17 @@ async function initWebRTCClient(toHostTopic, token) {
         }
     };
 
-    // DataChannel for mouse, touch, keyboard
+    // DataChannel for mouse, touch, keyboard & cursor sync
     dc = pc.createDataChannel("control", { ordered: true });
     dc.onopen = () => console.log("Kontrol kanalı açıldı.");
+    dc.onmessage = (event) => {
+        if (typeof event.data === "string" && event.data.startsWith("CURSOR:")) {
+            const [nx, ny] = event.data.slice(7).split(",").map(Number);
+            if (!Number.isNaN(nx) && !Number.isNaN(ny)) {
+                updateRemoteCursor(nx, ny);
+            }
+        }
+    };
     dc.onclose = () => {
         if (pc) {
             setTimeout(() => {
@@ -332,8 +341,10 @@ async function initWebRTCClient(toHostTopic, token) {
         }
     };
 
-    // Request video from host + bidirectional audio
+    // Request video from host + bidirectional sendrecv audio transceiver
     pc.addTransceiver("video", { direction: "recvonly" });
+    const audioTransceiver = pc.addTransceiver("audio", { direction: "sendrecv" });
+    audioSender = audioTransceiver.sender;
 
     try {
         localMicStream = await navigator.mediaDevices.getUserMedia({
@@ -343,13 +354,13 @@ async function initWebRTCClient(toHostTopic, token) {
                 autoGainControl: true
             }
         });
-        localMicStream.getAudioTracks().forEach(t => {
-            t.enabled = micEnabled;
-            pc.addTrack(t, localMicStream);
-        });
+        const micTrack = localMicStream.getAudioTracks()[0];
+        if (micTrack) {
+            micTrack.enabled = micEnabled;
+            await audioSender.replaceTrack(micTrack);
+        }
     } catch (err) {
         console.warn("Mikrofon erişimi alınamadı:", err);
-        pc.addTransceiver("audio", { direction: "recvonly" });
     }
 
     const offer = await pc.createOffer();
@@ -394,10 +405,13 @@ function cleanupClient(alertMsg) {
     }
     if (dc) { try { dc.close(); } catch {} dc = null; }
     if (pc) { try { pc.close(); } catch {} pc = null; }
+    audioSender = null;
     if (localMicStream) {
         localMicStream.getTracks().forEach(t => t.stop());
         localMicStream = null;
     }
+    const cursorEl = document.getElementById("remote-cursor");
+    if (cursorEl) cursorEl.classList.add("hidden");
     if (mqttClient) { try { mqttClient.end(true); } catch {} mqttClient = null; }
 
     const remoteVideo = document.getElementById("remote-video");
@@ -421,8 +435,30 @@ function cleanupClient(alertMsg) {
 }
 
 // --- CLIENT TOOLBAR CONTROLS ---
-function toggleMic() {
-    micEnabled = !micEnabled;
+async function toggleMic() {
+    const nextState = !micEnabled;
+    if (nextState && !localMicStream) {
+        try {
+            localMicStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+            const micTrack = localMicStream.getAudioTracks()[0];
+            if (micTrack && audioSender) {
+                await audioSender.replaceTrack(micTrack);
+            }
+        } catch (err) {
+            console.warn("Mikrofon izni alınamadı:", err);
+            micEnabled = false;
+            updateBtn("btn-mic", false, "Mikrofon");
+            alert("Mikrofon izni verilmedi veya mikrofon bulunamadı.");
+            return;
+        }
+    }
+    micEnabled = nextState;
     if (localMicStream) {
         localMicStream.getAudioTracks().forEach(t => { t.enabled = micEnabled; });
     }
@@ -432,7 +468,12 @@ function toggleMic() {
 function toggleSpk() {
     spkEnabled = !spkEnabled;
     const remoteAudio = document.getElementById("remote-audio");
-    if (remoteAudio) remoteAudio.muted = !spkEnabled;
+    if (remoteAudio) {
+        remoteAudio.muted = !spkEnabled;
+        if (spkEnabled && remoteAudio.srcObject) {
+            remoteAudio.play().catch(() => {});
+        }
+    }
     updateBtn("btn-spk", spkEnabled, "Hoparlör");
 }
 
@@ -462,6 +503,7 @@ function updateBtn(id, state, label) {
     if (btn) {
         btn.innerText = `${label}: ${state ? "Açık" : "Kapalı"}`;
         btn.style.opacity = state ? "1" : "0.75";
+        btn.classList.toggle("active-toggle", state);
     }
 }
 
@@ -497,6 +539,27 @@ function getNormalizedCoords(clientX, clientY, videoEl) {
     };
 }
 
+function updateRemoteCursor(nx, ny) {
+    const cursorEl = document.getElementById("remote-cursor");
+    const videoEl = document.getElementById("remote-video");
+    const wrapperEl = document.getElementById("video-wrapper");
+    if (!cursorEl || !videoEl || !wrapperEl || !videoEl.videoWidth || !videoEl.videoHeight) return;
+
+    const vRect = videoEl.getBoundingClientRect();
+    const wRect = wrapperEl.getBoundingClientRect();
+    const scale = Math.min(vRect.width / videoEl.videoWidth, vRect.height / videoEl.videoHeight);
+    const displayW = videoEl.videoWidth * scale;
+    const displayH = videoEl.videoHeight * scale;
+    const offsetX = (vRect.left - wRect.left) + (vRect.width - displayW) / 2;
+    const offsetY = (vRect.top - wRect.top) + (vRect.height - displayH) / 2;
+
+    const px = offsetX + Math.max(0, Math.min(1, nx)) * displayW;
+    const py = offsetY + Math.max(0, Math.min(1, ny)) * displayH;
+
+    cursorEl.classList.remove("hidden");
+    cursorEl.style.transform = `translate3d(${px - 3}px, ${py - 2}px, 0)`;
+}
+
 const remoteVideo = document.getElementById("remote-video");
 let moveRafPending = false;
 
@@ -505,7 +568,10 @@ remoteVideo.addEventListener("mousemove", (e) => {
     moveRafPending = true;
     requestAnimationFrame(() => {
         const coords = getNormalizedCoords(e.clientX, e.clientY, remoteVideo);
-        if (coords) sendControl(`MOVE:${coords.x},${coords.y}`);
+        if (coords) {
+            updateRemoteCursor(Number(coords.x), Number(coords.y));
+            sendControl(`MOVE:${coords.x},${coords.y}`);
+        }
         moveRafPending = false;
     });
 });
@@ -556,7 +622,10 @@ remoteVideo.addEventListener("touchstart", (e) => {
         const t = e.touches[0];
         const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
         touchStartInfo = { x: t.clientX, y: t.clientY, moved: false, longPressed: false };
-        if (coords) sendControl(`MOVE:${coords.x},${coords.y}`);
+        if (coords) {
+            updateRemoteCursor(Number(coords.x), Number(coords.y));
+            sendControl(`MOVE:${coords.x},${coords.y}`);
+        }
 
         longPressTimer = setTimeout(() => {
             if (touchStartInfo && !touchStartInfo.moved) {
@@ -586,7 +655,10 @@ remoteVideo.addEventListener("touchmove", (e) => {
             clearTimeout(longPressTimer);
         }
         const coords = getNormalizedCoords(t.clientX, t.clientY, remoteVideo);
-        if (coords) sendControl(`MOVE:${coords.x},${coords.y}`);
+        if (coords) {
+            updateRemoteCursor(Number(coords.x), Number(coords.y));
+            sendControl(`MOVE:${coords.x},${coords.y}`);
+        }
     }
 }, { passive: false });
 
