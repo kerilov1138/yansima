@@ -91,6 +91,7 @@
                     <div>
                         <label>Görüntü Kalitesi / FPS</label>
                         <select id="host-quality" onchange="applyHostStreamSettings()">
+                            <option value="native">Orijinal (Tam Çözünürlük / 30 FPS)</option>
                             <option value="ultra">Ultra (1080p / 60 FPS)</option>
                             <option value="high" selected>Yüksek (1080p / 30 FPS)</option>
                             <option value="medium">Dengeli (1600p / 24 FPS)</option>
@@ -229,6 +230,7 @@
                     <option value="1">Ana Ekran</option>
                 </select>
                 <select id="live-quality" onchange="applyLiveStreamSettings()">
+                    <option value="native">Orijinal (Tam Çözünürlük)</option>
                     <option value="ultra">Ultra (60 FPS)</option>
                     <option value="high" selected>Yüksek (30 FPS)</option>
                     <option value="medium">Dengeli (24 FPS)</option>

@@ -72,9 +72,18 @@ window.addEventListener("DOMContentLoaded", async () => {
         } catch (e) {
             console.error("Eel init hatası:", e);
         }
+    } else if (isAndroidApp) {
+        modeBadge.innerText = "Android Uygulaması (Host & İstemci)";
+        const savedBase = localStorage.getItem("yansima_pages_url") || "https://kerilov1138.github.io/yansima/";
+        document.getElementById("pages-base-url").value = savedBase;
+        const autoRow = document.getElementById("chk-autostart")?.closest("label");
+        if (autoRow) autoRow.classList.add("hidden");
+        const monSel = document.getElementById("host-monitor");
+        if (monSel) monSel.innerHTML = '<option value="1">Telefon / Tablet Ekranı</option>';
+        initAndroidHost();
     } else {
         hostCard.classList.add("hidden");
-        modeBadge.innerText = isAndroidApp ? "Android Uygulaması" : "Tarayıcı / Mobil İstemci";
+        modeBadge.innerText = "Tarayıcı / Mobil İstemci";
         setStatus(true, "Bağlanmaya Hazır");
     }
 
@@ -189,6 +198,8 @@ async function regenerateInvite() {
         } catch (e) {
             console.error("Yenileme hatası:", e);
         }
+    } else if (isAndroidApp) {
+        rotateAndroidToken();
     }
 }
 
@@ -253,6 +264,8 @@ function respondConnection(allow, controlAllowed = true) {
     }
     if (isDesktopApp) {
         eel.respond_to_request(allow, controlAllowed);
+    } else if (isAndroidApp) {
+        androidHostRespond(allow, controlAllowed);
     }
 }
 
@@ -292,6 +305,8 @@ async function on_host_session_ended() {
                 update_invite_ui(info.room, info.token);
             }
         } catch {}
+    } else if (isAndroidApp) {
+        rotateAndroidToken();
     }
 }
 
@@ -332,22 +347,36 @@ function sendHostChat() {
     inp.value = "";
     appendChatMessage("host-chat-messages", "Ben", txt, true);
     if (isDesktopApp) eel.host_send_chat(txt);
+    else if (isAndroidApp && androidHostDc && androidHostDc.readyState === "open") {
+        const bytes = new TextEncoder().encode(txt);
+        let bin = "";
+        bytes.forEach(b => { bin += String.fromCharCode(b); });
+        androidHostDc.send(`CHAT:${btoa(bin)}`);
+    }
 }
 
 function toggleHostMic() {
     hostMicState = !hostMicState;
     updateBtn("btn-mic-host", hostMicState, "Mikrofon");
     if (isDesktopApp) eel.toggle_audio(hostMicState, hostSpkState);
+    else if (isAndroidApp && androidHostMicStream) {
+        androidHostMicStream.getAudioTracks().forEach(t => { t.enabled = hostMicState; });
+    }
 }
 
 function toggleHostSpk() {
     hostSpkState = !hostSpkState;
     updateBtn("btn-spk-host", hostSpkState, "Hoparlör");
     if (isDesktopApp) eel.toggle_audio(hostMicState, hostSpkState);
+    else if (isAndroidApp) {
+        const ra = document.getElementById("remote-audio");
+        if (ra) ra.muted = !hostSpkState;
+    }
 }
 
 function stopHostSession() {
     if (isDesktopApp) eel.stop_session();
+    else if (isAndroidApp) closeAndroidHostSession(true);
     on_host_session_ended();
 }
 
@@ -659,7 +688,12 @@ async function initWebRTCClient(toHostTopic, token) {
     }
 
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    let offerSdp = offer.sdp;
+    // On Desktop PC-to-PC viewing, raise m=video bandwidth cap for sharper text
+    if (!isAndroidApp && !/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)) {
+        offerSdp = offerSdp.replace(/(m=video [^\r\n]+\r\nc=IN [^\r\n]+\r\n)/, "$1b=AS:8000\r\n");
+    }
+    await pc.setLocalDescription({ type: offer.type, sdp: offerSdp });
 
     // Wait briefly (up to 1.2s) for STUN srflx candidates so offer.sdp includes them directly
     await new Promise((resolve) => {
@@ -1038,6 +1072,254 @@ function closeQrScanner() {
     const video = document.getElementById("qr-video");
     if (video) video.srcObject = null;
     document.getElementById("qr-modal")?.classList.add("hidden");
+}
+
+// --- ANDROID HOST MODE (Share Phone/Tablet Screen to PC) ---
+let androidHostMqtt = null;
+let androidHostPc = null;
+let androidHostDc = null;
+let androidHostMicStream = null;
+let androidHostPending = null;
+let androidHostActiveCid = null;
+let androidHostCanvasTimer = null;
+let androidHostStream = null;
+
+function generateRandomDigits(len) {
+    let s = "";
+    for (let i = 0; i < len; i++) s += Math.floor(Math.random() * 10);
+    return s;
+}
+
+function generateRandomToken() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_";
+    let t = "";
+    for (let i = 0; i < 8; i++) t += chars[Math.floor(Math.random() * chars.length)];
+    return t;
+}
+
+function rotateAndroidToken() {
+    const newTok = generateRandomToken();
+    update_invite_ui(currentRoom, newTok);
+}
+
+function initAndroidHost() {
+    let savedRoom = localStorage.getItem("yansima_android_room");
+    if (!savedRoom || savedRoom.length !== 9) {
+        savedRoom = String(Math.floor(100000000 + Math.random() * 900000000));
+        localStorage.setItem("yansima_android_room", savedRoom);
+    }
+    update_invite_ui(savedRoom, generateRandomToken());
+    startAndroidHostMqtt(0);
+}
+
+function startAndroidHostMqtt(brokerIdx) {
+    if (brokerIdx >= MQTT_BROKERS.length) {
+        setStatus(false, "Sinyal Hatası");
+        return;
+    }
+    const toHostTopic = `yansima/v1/${currentRoom}/to-host`;
+    let connectedOnce = false;
+    const c = mqtt.connect(MQTT_BROKERS[brokerIdx], { connectTimeout: 7000, reconnectPeriod: 4000 });
+    androidHostMqtt = c;
+
+    c.on("connect", () => {
+        connectedOnce = true;
+        c.subscribe(toHostTopic, (err) => {
+            if (!err) setStatus(true, "Çevrimiçi (Hazır)");
+        });
+    });
+
+    c.on("error", () => {
+        if (!connectedOnce) {
+            try { c.end(true); } catch {}
+            startAndroidHostMqtt(brokerIdx + 1);
+        }
+    });
+
+    c.on("message", async (_topic, payload) => {
+        let data;
+        try { data = JSON.parse(payload.toString()); } catch { return; }
+        const mtype = data.type;
+        const cid = data.clientId;
+        const tok = data.token;
+
+        if (tok !== currentToken) {
+            if (mtype === "join" || mtype === "offer") {
+                c.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+                    type: "rejected",
+                    reason: "Tek seferlik şifre geçersiz veya süresi dolmuş."
+                }));
+            }
+            return;
+        }
+
+        if (mtype === "join") {
+            if (androidHostPc || androidHostPending) {
+                c.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+                    type: "rejected",
+                    reason: "Bu cihaz şu anda başka bir oturumda."
+                }));
+                return;
+            }
+            androidHostPending = { clientId: cid, token: tok, device: data.device || "Uzak Cihaz" };
+            show_connection_request(androidHostPending.device);
+        } else if (mtype === "offer") {
+            await handleAndroidHostOffer(cid, data.sdp, data.sdpType || "offer");
+        } else if (mtype === "ice" && androidHostPc && data.candidate) {
+            try { await androidHostPc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch {}
+        } else if (mtype === "bye") {
+            closeAndroidHostSession(false);
+            on_host_session_ended();
+        }
+    });
+}
+
+function androidHostRespond(allow, _ctrlAllowed) {
+    const pending = androidHostPending;
+    if (!pending || !androidHostMqtt) return;
+    const cid = pending.clientId;
+    if (!allow) {
+        androidHostPending = null;
+        androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+            type: "rejected",
+            reason: "Bağlantı isteği reddedildi."
+        }));
+        return;
+    }
+
+    if (window.AndroidBridge && window.AndroidBridge.startScreenCapture) {
+        window.__onAndroidCaptureReady = (ok) => {
+            window.__onAndroidCaptureReady = null;
+            if (ok) {
+                androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({ type: "accepted" }));
+            } else {
+                androidHostPending = null;
+                androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+                    type: "rejected",
+                    reason: "Ekran paylaşım izni verilmedi."
+                }));
+            }
+        };
+        window.AndroidBridge.startScreenCapture();
+    } else {
+        androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({ type: "accepted" }));
+    }
+}
+
+async function handleAndroidHostOffer(cid, sdp, sdpType) {
+    closeAndroidHostSession(false);
+    androidHostActiveCid = cid;
+    androidHostPending = null;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 720;
+    canvas.height = 1280;
+    const ctx = canvas.getContext("2d");
+    let busy = false;
+    const img = new Image();
+
+    androidHostCanvasTimer = setInterval(() => {
+        if (busy || !window.AndroidBridge || !window.AndroidBridge.getLatestFrame) return;
+        const b64 = window.AndroidBridge.getLatestFrame();
+        if (!b64) return;
+        busy = true;
+        img.onload = () => {
+            if (canvas.width !== img.width || canvas.height !== img.height) {
+                canvas.width = img.width;
+                canvas.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0);
+            busy = false;
+        };
+        img.onerror = () => { busy = false; };
+        img.src = "data:image/jpeg;base64," + b64;
+    }, 50);
+
+    androidHostStream = canvas.captureStream(20);
+    const hpc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 });
+    androidHostPc = hpc;
+
+    androidHostStream.getVideoTracks().forEach(t => hpc.addTrack(t, androidHostStream));
+
+    try {
+        androidHostMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        androidHostMicStream.getAudioTracks().forEach(t => {
+            t.enabled = hostMicState;
+            hpc.addTrack(t, androidHostMicStream);
+        });
+    } catch {}
+
+    hpc.ontrack = (event) => {
+        if (event.track.kind === "audio") {
+            const ra = document.getElementById("remote-audio");
+            if (ra) {
+                ra.srcObject = new MediaStream([event.track]);
+                ra.muted = !hostSpkState;
+                ra.play().catch(() => {});
+            }
+        }
+    };
+
+    hpc.ondatachannel = (ev) => {
+        androidHostDc = ev.channel;
+        androidHostDc.onopen = () => {
+            try { androidHostDc.send("MODE:readonly"); } catch {}
+        };
+        androidHostDc.onmessage = (m) => {
+            if (typeof m.data === "string" && m.data.startsWith("CHAT:")) {
+                try {
+                    const b64 = m.data.slice(5);
+                    const bytes = Uint8Array.from(atob(b64), ch => ch.charCodeAt(0));
+                    on_host_chat_message("Uzak Cihaz", new TextDecoder().decode(bytes));
+                } catch {}
+            }
+        };
+    };
+
+    hpc.onicecandidate = (ev) => {
+        if (ev.candidate && androidHostMqtt) {
+            androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+                type: "ice",
+                candidate: ev.candidate
+            }));
+        }
+    };
+
+    hpc.onconnectionstatechange = () => {
+        if (!androidHostPc) return;
+        if (androidHostPc.connectionState === "connected") {
+            showHostView();
+        } else if (androidHostPc.connectionState === "failed" || androidHostPc.connectionState === "closed") {
+            closeAndroidHostSession(false);
+            on_host_session_ended();
+        }
+    };
+
+    await hpc.setRemoteDescription(new RTCSessionDescription({ type: sdpType, sdp }));
+    const ans = await hpc.createAnswer();
+    await hpc.setLocalDescription(ans);
+
+    androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${cid}`, JSON.stringify({
+        type: "answer",
+        sdp: hpc.localDescription.sdp,
+        sdpType: hpc.localDescription.type
+    }));
+}
+
+function closeAndroidHostSession(sendBye) {
+    if (sendBye && androidHostMqtt && androidHostActiveCid) {
+        androidHostMqtt.publish(`yansima/v1/${currentRoom}/to-client/${androidHostActiveCid}`, JSON.stringify({ type: "bye" }));
+    }
+    if (androidHostCanvasTimer) { clearInterval(androidHostCanvasTimer); androidHostCanvasTimer = null; }
+    if (androidHostStream) { androidHostStream.getTracks().forEach(t => t.stop()); androidHostStream = null; }
+    if (androidHostMicStream) { androidHostMicStream.getTracks().forEach(t => t.stop()); androidHostMicStream = null; }
+    if (androidHostDc) { try { androidHostDc.close(); } catch {} androidHostDc = null; }
+    if (androidHostPc) { try { androidHostPc.close(); } catch {} androidHostPc = null; }
+    androidHostPending = null;
+    androidHostActiveCid = null;
+    if (window.AndroidBridge && window.AndroidBridge.stopScreenCapture) {
+        window.AndroidBridge.stopScreenCapture();
+    }
 }
 
 function toggleMobileKeyboard() {

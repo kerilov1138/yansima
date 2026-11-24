@@ -201,8 +201,8 @@ class HostSession:
         self.mqtt_text = "Hazırlanıyor..."
         self.control_enabled = True
         self.monitor_index = 1
-        self.max_width = 1600
-        self.target_fps = 24
+        self.max_width = 1920
+        self.target_fps = 30
         self.audio_source = "both"  # "mic", "system", "both"
         self.privacy_enabled = False
         self.data_channel = None
@@ -260,7 +260,7 @@ class ScreenVideoTrack(MediaStreamTrack):
     def _grab_frame(self):
         idx = session.monitor_index
         max_w = session.max_width
-        if self._frame_count < 30 and max_w > 1280:
+        if self._frame_count < 15 and max_w > 1280:
             max_w = 1280
 
         dx = self._ensure_dxcam(idx)
@@ -272,7 +272,7 @@ class ScreenVideoTrack(MediaStreamTrack):
                     if w > max_w:
                         img = Image.fromarray(arr)
                         new_h = int(h * (max_w / w))
-                        arr = np.asarray(img.resize((max_w, new_h), Image.Resampling.BILINEAR))
+                        arr = np.asarray(img.resize((max_w, new_h), Image.Resampling.LANCZOS))
                     self._last_rgb = np.ascontiguousarray(arr)
                     return self._last_rgb
                 elif self._last_rgb is not None:
@@ -290,7 +290,7 @@ class ScreenVideoTrack(MediaStreamTrack):
         if raw.width > max_w:
             img = Image.frombytes("RGB", raw.size, raw.rgb)
             new_h = int(raw.height * (max_w / raw.width))
-            img = img.resize((max_w, new_h), Image.Resampling.BILINEAR)
+            img = img.resize((max_w, new_h), Image.Resampling.LANCZOS)
             self._last_rgb = np.asarray(img)
             return self._last_rgb
         arr = np.frombuffer(raw.rgb, dtype=np.uint8).reshape((raw.height, raw.width, 3))
@@ -1135,6 +1135,7 @@ def set_stream_settings(monitor_idx, quality):
         "medium": (1600, 24),
         "high": (1920, 30),
         "ultra": (1920, 60),
+        "native": (3840, 30),
     }
     max_w, fps = q_map.get(quality, (1920, 30))
     session.max_width = max_w
